@@ -4,7 +4,8 @@ import time
 import traceback
 
 from dotenv import load_dotenv
-from fake_useragent import UserAgent
+from random_user_agent.params import OperatingSystem, SoftwareName
+from random_user_agent.user_agent import UserAgent
 from selenium import webdriver
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.chrome.options import Options
@@ -166,8 +167,13 @@ if __name__ == "__main__":
         # ヘッドレスモードで起動する。
         chrome_options.add_argument("--headless=new")
         # ユーザーエージェントの指定。
+        software_names = [SoftwareName.CHROME.value]
+        operating_systems = [OperatingSystem.WINDOWS.value,
+                             OperatingSystem.LINUX.value]
+        user_agent_rotator = UserAgent(
+            software_names=software_names, operating_systems=operating_systems, limit=100)
         chrome_options.add_argument(
-            "--user-agent=" + UserAgent("windows").chrome)
+            f"--user-agent={user_agent_rotator.get_random_user_agent()}")
         # ウィンドウの初期サイズを最大化。
         chrome_options.add_argument("--start-maximized")
         driver = webdriver.Chrome(options=chrome_options)
