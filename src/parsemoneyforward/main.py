@@ -156,6 +156,23 @@ def click_reloads_selenium():
         print(f"更新ボタン押下時にエラーが発生しました: {str(e)}")
 
 
+def get_net_assets():
+    """純資産の取得"""
+    # バランスシートページへ遷移
+    balance_sheet_url = "https://moneyforward.com/bs/balance_sheet"
+    driver.get(balance_sheet_url)
+
+    # 純資産の値を取得
+    net_assets_element = WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located(
+            (By.XPATH,
+             "//th[text()='純資産']/following-sibling::td[@class='number']")
+        )
+    )
+    # 純資産の値を出力
+    print("純資産: ", net_assets_element.text)
+
+
 if __name__ == "__main__":
     load_dotenv(verbose=True)
     try:
@@ -193,9 +210,13 @@ if __name__ == "__main__":
             print("クッキーが無効です。通常のログインを実行します。")
             login_selenium(email, password)
 
-        # 更新をクリックしてスクリーンショットを撮る
-        print("リロードボタンを押下しています。")
+        # 口座の更新
+        print("リロードボタンを押下します。")
         click_reloads_selenium()
+
+        # 純資産の取得
+        print("純資産の値を出力します。")
+        get_net_assets()
 
         print("処理が完了しました。")
     except Exception as e:
