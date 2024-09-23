@@ -3,6 +3,7 @@ import pickle
 import time
 import traceback
 
+import requests
 from dotenv import load_dotenv
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
@@ -157,7 +158,11 @@ def click_reloads_selenium():
 
 
 def get_net_assets():
-    """純資産の取得"""
+    """純資産の取得
+
+    Returns:
+        str: 純資産の値
+    """
     # バランスシートページへ遷移
     balance_sheet_url = "https://moneyforward.com/bs/balance_sheet"
     driver.get(balance_sheet_url)
@@ -169,8 +174,24 @@ def get_net_assets():
              "//th[text()='純資産']/following-sibling::td[@class='number']")
         )
     )
-    # 純資産の値を出力
-    print("純資産: ", net_assets_element.text)
+    return net_assets_element.text
+
+
+def send_line_notify(context):
+    """LineNotifyでメッセージを送信する
+
+    Args:
+        context str: 送信する文字列
+    """
+    # APIのURLとトークン
+    url = "https://notify-api.line.me/api/notify"
+    load_dotenv(verbose=True)
+    LINE_NOTIFY_TOKEN = os.getenv('LINE_NOTIFY_TOKEN')
+
+    # メッセージを送信
+    headers = {"Authorization": "Bearer " + LINE_NOTIFY_TOKEN}
+    send_data = {"message": context}
+    requests.post(url, headers=headers, data=send_data)
 
 
 if __name__ == "__main__":
@@ -215,8 +236,11 @@ if __name__ == "__main__":
         click_reloads_selenium()
 
         # 純資産の取得
-        print("純資産の値を出力します。")
-        get_net_assets()
+        net_assets = get_net_assets()
+        # LineNotifyに純資産の値を送信
+        print("LineNotifyに純資産の値を送信します")
+        context = f"純資産: {net_assets}"
+        send_line_notify(context)
 
         print("処理が完了しました。")
     except Exception as e:
