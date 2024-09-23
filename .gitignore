@@ -13,3 +13,4 @@ wheels/
 test*.py
 .env
 *.lock
+cookies.pkl
