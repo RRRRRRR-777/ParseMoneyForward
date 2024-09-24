@@ -4,6 +4,7 @@ import time
 import traceback
 
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
@@ -177,6 +178,35 @@ def get_net_assets():
     return net_assets_element.text
 
 
+def get_all_amount():
+    """すべての口座の値を取得
+
+    Returns:
+        str: 口座の値
+    """
+    toppage_url = "https://moneyforward.com"
+    driver.get(toppage_url)
+
+    # Beautiful Soupでパース
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    li_elements = soup.find('section', id='registered-accounts').find_all('li',
+                                                                          class_=['heading-category-name', 'account'])
+    # 出力を格納するリスト
+    output_lines = []
+    # 各liタグを処理
+    for li in li_elements:
+        if 'heading-category-name' in li['class']:
+            output_lines.append(f"---{li.text.strip()}---")
+        elif 'account' in li['class']:
+            bank_name = li.find('a').text
+            amount = li.find('ul', class_="amount").find(
+                'li', class_="number").text
+            output_lines.append(f" {bank_name}\n {amount}")
+
+    all_amount = "\n".join(output_lines)
+    return all_amount
+
+
 def send_line_notify(context):
     """LineNotifyでメッセージを送信する
 
@@ -239,7 +269,8 @@ if __name__ == "__main__":
         net_assets = get_net_assets()
         # LineNotifyに純資産の値を送信
         print("LineNotifyに純資産の値を送信します")
-        context = f"純資産: {net_assets}"
+        all_amount = get_all_amount()
+        context = f"\n[すべての口座]\n{all_amount}\n\n[純資産]\n{net_assets}"
         send_line_notify(context)
 
         print("処理が完了しました。")
@@ -249,3 +280,26 @@ if __name__ == "__main__":
     finally:
         if driver:
             driver.quit()
+
+"""
+[ParseMoneyForward]
+[すべての口座]
+---銀行---
+三井住友銀行
+222,669円
+楽天銀行
+49,007円
+---証券---
+マネックス
+167,133円
+楽天証券
+301,456円
+---カード---
+エポスカード
+-95,000円
+三井住友カード
+-161,918円
+
+[純資産]
+482,691円
+"""
