@@ -191,21 +191,59 @@ def get_all_amount():
     soup = BeautifulSoup(driver.page_source, "html.parser")
     li_elements = soup.find('section', id='registered-accounts').find_all('li',
                                                                           class_=['heading-category-name', 'account'])
-    # 出力を格納するリスト
-    output_lines = []
+    # 出力を格納する辞書
+    all_aomount = {}
     # 各liタグを処理
     for li in li_elements:
         if 'heading-category-name' in li['class']:
-            output_lines.append(f"---{li.text.strip()}---")
+            heading = li.text.strip()
+            if heading not in all_aomount:
+                all_aomount[heading] = []
         elif 'account' in li['class']:
             bank_name = li.find('a').text
             amount = li.find('ul', class_="amount").find(
                 'li', class_="number").text
-            output_lines.append(f" {bank_name}\n {amount}")
+            balance = li.find('ul', class_="amount").find(
+                'li', class_="balance").text if li.find('ul', class_="amount").find('li', class_="balance") else None
 
-    all_amount = "\n".join(output_lines)
+            account_data = {
+                'bank_name': bank_name,
+                'number': amount,
+                'balance': balance
+            }
+
+            all_aomount[heading].append(account_data)
     return all_amount
 
+
+def get_notion_database():
+    """Notionデータベースの値を取得する
+
+    Returns:
+        list: Notionデータベースの値
+    """
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    api_key = os.environ["NOTION_KEY"]
+    notion_database = []
+    # URLを関数内で定義
+    url = f'https://api.notion.com/v1/databases/{database_id}/query'
+    headers = {
+        "Notion-Version": "2022-06-28",
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(url, headers=headers)
+    results = response.json().get('results', [])
+
+    for result in results:
+        name = result["properties"]["名前"]['title'][0].get('plain_text', 'N/A')
+        price = result["properties"]["数値"].get('number', 'N/A')
+        notion_database.append({
+            'name': name,
+            'price': price
+        })
+    return notion_database
 
 def send_line_notify(context):
     """LineNotifyでメッセージを送信する
@@ -270,6 +308,8 @@ if __name__ == "__main__":
         # LineNotifyに純資産の値を送信
         print("LineNotifyに純資産の値を送信します")
         all_amount = get_all_amount()
+        notion_database = get_notion_database()
+
         context = f"\n[すべての口座]\n{all_amount}\n\n[純資産]\n{net_assets}"
         send_line_notify(context)
 
