@@ -1,7 +1,9 @@
 import os
 import pickle
+import re
 import time
 import traceback
+from pprint import pprint
 
 import requests
 from bs4 import BeautifulSoup
@@ -158,24 +160,20 @@ def click_reloads_selenium():
         print(f"更新ボタン押下時にエラーが発生しました: {str(e)}")
 
 
-def get_net_assets():
-    """純資産の取得
+def extract_number(text):
+    """正規表現でマイナス記号と数字を抽出
+
+    Args:
+        text (str): 抽出元の文字列
 
     Returns:
-        str: 純資産の値
+        int: マッチした場合はその値をそうでない場合は0を格納する
     """
-    # バランスシートページへ遷移
-    balance_sheet_url = "https://moneyforward.com/bs/balance_sheet"
-    driver.get(balance_sheet_url)
-
-    # 純資産の値を取得
-    net_assets_element = WebDriverWait(driver, 30).until(
-        EC.presence_of_element_located(
-            (By.XPATH,
-             "//th[text()='純資産']/following-sibling::td[@class='number']")
-        )
-    )
-    return net_assets_element.text
+    match = re.search(r'-?\d+,?\d+', text)
+    if match:
+        # 抽出した値のカンマを除去して整数に変換
+        return int(match.group().replace(',', ''))
+    return 0
 
 
 def get_all_amount():
@@ -191,20 +189,108 @@ def get_all_amount():
     soup = BeautifulSoup(driver.page_source, "html.parser")
     li_elements = soup.find('section', id='registered-accounts').find_all('li',
                                                                           class_=['heading-category-name', 'account'])
-    # 出力を格納するリスト
-    output_lines = []
+    # 出力を格納する辞書
+    all_amount = {}
     # 各liタグを処理
     for li in li_elements:
         if 'heading-category-name' in li['class']:
-            output_lines.append(f"---{li.text.strip()}---")
+            heading = li.text.strip()
+            if heading not in all_amount:
+                all_amount[heading] = []
         elif 'account' in li['class']:
+            # 口座名
             bank_name = li.find('a').text
-            amount = li.find('ul', class_="amount").find(
-                'li', class_="number").text
-            output_lines.append(f" {bank_name}\n {amount}")
+            # 使用高
+            amount_ = li.find('ul', class_="amount").find(
+                'li', class_="number")
+            amount = extract_number(amount_.text) if amount_ else 0
+            # 残高
+            balance_ = li.find('ul', class_="amount").find(
+                'li', class_="balance")
+            balance = extract_number(balance_.text) if balance_ else 0
 
-    all_amount = "\n".join(output_lines)
+            account_data = {
+                'bank_name': bank_name,
+                'number': amount,
+                'balance': balance
+            }
+
+            all_amount[heading].append(account_data)
     return all_amount
+
+
+def get_notion_database():
+    """Notionデータベースの値を取得する
+
+    Returns:
+        list: Notionデータベースの値
+    """
+    database_id = os.environ["NOTION_DATABASE_ID"]
+    api_key = os.environ["NOTION_KEY"]
+    notion_database = []
+    # URLを関数内で定義
+    url = f'https://api.notion.com/v1/databases/{database_id}/query'
+    headers = {
+        "Notion-Version": "2022-06-28",
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(url, headers=headers)
+    results = response.json().get('results', [])
+
+    for result in results:
+        name = result["properties"]["名前"]['title'][0].get('plain_text', 'N/A')
+        price = result["properties"]["数値"].get('number', 'N/A')
+        notion_database.append({
+            'name': name,
+            'price': price
+        })
+    return notion_database
+
+
+def get_current_month_balance():
+    summary_url = "https://moneyforward.com/cf/summary"
+    driver.get(summary_url)
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    current_month_balance_ = soup.find(
+        'section', id='monthly-total').find('tbody').find_all('td')[-1]
+    current_month_balance = extract_number(
+        current_month_balance_.text.replace('\n', ''))
+
+    return current_month_balance
+
+
+def calculate_balance(all_amount, notion_database, current_month_balance):
+    balance_list = []
+    stock_list = []
+
+    # マネーフォワードの口座
+    for category, items in all_amount.items():
+        for item in items:
+            (stock_list if category == "証券" else balance_list).append({
+                'name': item['bank_name'],
+                'price': item['number']
+            })
+    # Notionのデータベース
+    for data in notion_database:
+        name = data['name']
+        price = data['price']
+        balance_list.append({
+            'name': name,
+            'price': price
+        })
+    # 今月の支出
+    balance_list.append({
+        'name': '今月の支出',
+        'price': current_month_balance
+    })
+
+    balance_ = sum(item['price'] for item in balance_list)
+    balance = f"{balance_:,}円"
+    stock = "\n".join(
+        [f"{item['name']}: {item['price']:,}円" for item in stock_list])
+    return balance, stock
 
 
 def send_line_notify(context):
@@ -261,16 +347,13 @@ if __name__ == "__main__":
             print("クッキーが無効です。通常のログインを実行します。")
             login_selenium(email, password)
 
-        # 口座の更新
-        print("リロードボタンを押下します。")
-        click_reloads_selenium()
-
-        # 純資産の取得
-        net_assets = get_net_assets()
-        # LineNotifyに純資産の値を送信
         print("LineNotifyに純資産の値を送信します")
         all_amount = get_all_amount()
-        context = f"\n[すべての口座]\n{all_amount}\n\n[純資産]\n{net_assets}"
+        notion_database = get_notion_database()
+        current_month_balance = get_current_month_balance()
+        balance, stock = calculate_balance(
+            all_amount, notion_database, current_month_balance)
+        context = f"\n[ラッキーマネー]\n{balance}\n\n[証券口座]\n{stock}"
         send_line_notify(context)
 
         print("処理が完了しました。")
@@ -280,26 +363,3 @@ if __name__ == "__main__":
     finally:
         if driver:
             driver.quit()
-
-"""
-[ParseMoneyForward]
-[すべての口座]
----銀行---
-三井住友銀行
-222,669円
-楽天銀行
-49,007円
----証券---
-マネックス
-167,133円
-楽天証券
-301,456円
----カード---
-エポスカード
--95,000円
-三井住友カード
--161,918円
-
-[純資産]
-482,691円
-"""
