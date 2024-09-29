@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import (
+    NoSuchWindowException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -126,37 +130,17 @@ def login_selenium(email, password):
 
 
 def click_reloads_selenium():
-    """Seleniumを使用して口座の更新ボタンをクリックする"""
-    xpath = "//input[@data-disable-with='更新']"
-    max_retries = 3
-
+    """Seleniumを使用して全ての更新ボタンをクリックする"""
     try:
-        # 全ての更新ボタンを見つける
-        buttons = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.XPATH, xpath))
-        )
-        # 各更新ボタンを押下する
-        for button in buttons:
-            for attempt in range(max_retries):
-                try:
-                    # ボタンが再度見つかるまで待機
-                    refreshed_button = WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.XPATH, xpath))
-                    )
-                    # クリック可能になるまで待機してクリック
-                    WebDriverWait(driver, 10).until(
-                        EC.element_to_be_clickable(refreshed_button)).click()
-                    time.sleep(1)
-                    break  # クリック成功したらこのボタンの処理を終了
-                # ボタンの押下に失敗した際の処理
-                except StaleElementReferenceException:
-                    if attempt == max_retries - 1:
-                        print(f"ボタン {buttons.index(
-                            button) + 1} はクリックできませんでした。")
-                    continue  # 次の試行へ
-
+        elms = driver.find_elements(
+            By.XPATH, "//input[@data-disable-with='更新']")
+        for elm in elms:
+            elm.click()
+            time.sleep(0.5)
     except Exception as e:
-        print(f"更新ボタン押下時にエラーが発生しました: {str(e)}")
+        print(f"更新ボタンのクリック中にエラーが発生しました。\n{e}")
+    finally:
+        time.sleep(3)
 
 
 def extract_number(text):
