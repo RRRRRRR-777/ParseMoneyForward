@@ -3,7 +3,6 @@ import pickle
 import re
 import time
 import traceback
-from pprint import pprint
 
 import requests
 from bs4 import BeautifulSoup
@@ -187,8 +186,19 @@ def get_all_amount():
 
     # Beautiful Soupでパース
     soup = BeautifulSoup(driver.page_source, "html.parser")
-    li_elements = soup.find('section', id='registered-accounts').find_all('li',
-                                                                          class_=['heading-category-name', 'account'])
+
+    li_elements = []
+    try:
+        section = soup.find('section', id='registered-accounts')
+        if section:
+            li_elements = section.find_all(
+                'li', class_=['heading-category-name', 'account'])
+        else:
+            print("Warning: 'registered-accounts' section not found.")
+    except AttributeError as e:
+        print(f"Error: {e}")
+    if not li_elements:
+        print("No 'li' elements found.")
     # 出力を格納する辞書
     all_amount = {}
     # 各liタグを処理
@@ -354,10 +364,14 @@ if __name__ == "__main__":
         # Lineに値を送信
         print("LineNotifyに純資産の値を送信します")
         all_amount = get_all_amount()
+        print("マネーフォワードの口座\n", all_amount)
         notion_database = get_notion_database()
+        print("Notionのデータベース\n", notion_database)
         current_month_balance = get_current_month_balance()
+        print("現在の収支\n", current_month_balance)
         balance, stock = calculate_balance(
             all_amount, notion_database, current_month_balance)
+        print(f"ラッキーマネー\n{balance}\n証券口座")
         context = f"\n[ラッキーマネー]\n{balance}\n\n[証券口座]\n{stock}"
         send_line_notify(context)
 
