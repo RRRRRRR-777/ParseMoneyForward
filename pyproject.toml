@@ -1,9 +1,9 @@
 [project]
 name = "parsemoneyforward"
-version = "0.1.0"
+version = "1.0.0"
 description = "Add your description here"
 authors = [
-    { name = "riku.yamada", email = "riku.yamada@optim.co.jp" }
+    { name = "riku.yamada"}
 ]
 dependencies = [
     "selenium>=4.24.0",

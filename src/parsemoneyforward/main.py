@@ -347,6 +347,11 @@ if __name__ == "__main__":
             print("クッキーが無効です。通常のログインを実行します。")
             login_selenium(email, password)
 
+        # 口座の更新
+        print("リロードボタンを押下します。")
+        click_reloads_selenium()
+
+        # Lineに値を送信
         print("LineNotifyに純資産の値を送信します")
         all_amount = get_all_amount()
         notion_database = get_notion_database()
