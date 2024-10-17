@@ -10,12 +10,8 @@ from dotenv import load_dotenv
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
 from selenium import webdriver
-from selenium.common.exceptions import (
-    NoSuchWindowException,
-    StaleElementReferenceException,
-    TimeoutException,
-)
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -313,7 +309,9 @@ if __name__ == "__main__":
 
         # ウィンドウの初期サイズを最大化。
         chrome_options.add_argument("--start-maximized")
-        driver = webdriver.Chrome(options=chrome_options)
+        service = Service(executable_path="/snap/bin/chromium.chromedriver")
+        # chromedriverのパスを指定してサービスを作成
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
         # クッキーが存在するかを確認
         try:
