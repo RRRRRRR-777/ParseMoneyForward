@@ -1,7 +1,7 @@
 [project]
 name = "parsemoneyforward"
-version = "1.0.0"
-description = "Add your description here"
+version = "1.1.0"
+description = "マネーフォワードの口座は、一括で更新することが可能です。ただし、すべての口座を一括で更新するためには、プレミアムプランへの加入が必要です。次に、今月の残額計算では、銀行口座の残高、クレジットカードの使用額、そして今月の支出を算出し、その結果をLineに送信します。また、証券口座に関しても、残高情報を取得し、Lineに送信します。"
 authors = [
     { name = "riku.yamada"}
 ]
