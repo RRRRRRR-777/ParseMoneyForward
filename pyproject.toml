@@ -12,6 +12,7 @@ dependencies = [
     "requests>=2.32.3",
     "bs4>=0.0.2",
     "isort>=5.13.2",
+    "jpholiday>=0.1.10",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
