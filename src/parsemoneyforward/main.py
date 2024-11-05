@@ -10,6 +10,7 @@ from pprint import pprint
 import jpholiday
 import requests
 from bs4 import BeautifulSoup
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
@@ -336,10 +337,15 @@ class CreateMonthlyBalancePage:
         Returns:
             str: 作成されたデータベースのID。エラーが発生した場合はNoneを返します。
         """
-        month = "11"
+        # 現在の日付と月を取得
+        current_month = datetime.datetime.now()
+        # 1ヶ月加える
+        month = (current_month + relativedelta(months=1)).month
+
         data = {
             "parent": {"type": "page_id", "page_id": self.parent_page_id},
             "title": [{"type": "text", "text": {"content": f"{month}月度のお金"}}],
+            "icon": {"type": "emoji", "emoji": "💵"},
             "properties": {
                 "名前": {"title": {}},
                 "金額": {"number": {"format": "yen"}},
@@ -687,13 +693,13 @@ if __name__ == "__main__":
             print("クッキーが無効です。通常のログインを実行します。")
             login_selenium(EMAIL, PASSWORD)
 
-        # # 口座の更新
-        # print("リロードボタンを押下します")
-        # click_reloads_selenium()
+        # 口座の更新
+        print("リロードボタンを押下します")
+        click_reloads_selenium()
 
         # Lineに値を送信
         all_amount = get_all_amount()
-        print("マネーフォワードの口座:\n")
+        print("マネーフォワードの口座:")
         pprint(all_amount)
         # Notionから値を取得
         create_monthly_balance_page = CreateMonthlyBalancePage(
@@ -703,13 +709,14 @@ if __name__ == "__main__":
         print(f"月初の残高: {current_month_balance}")
         # 現在の支出を取得
         current_month_expense = get_current_month_expense()
-        print(f"現在の支出: {current_month_expense}")
+        current_month_expense_formatted = "{:,}".format(current_month_expense)
+        print(f"現在の支出: {current_month_expense_formatted}")
         # 現在の残高を計算
         balance, stock = calculate_balance(
             all_amount, current_month_balance, current_month_expense
         )
         print(f"ラッキーマネー: {balance}\n証券口座:\n{stock}")
-        context = f"\n[ラッキーマネー]\n{balance}\n\n[証券口座]\n{stock}"
+        context = f"\n[ラッキーマネー]\n{balance}\n\n[現在の支出]\n{current_month_expense_formatted}\n\n[証券口座]\n{stock}"
         print("LineNotifyに純資産の値を送信します")
         send_line_notify(context)
     except Exception as e:
