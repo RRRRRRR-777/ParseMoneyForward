@@ -96,7 +96,7 @@ def login_selenium(email, password):
     try:
         # Email入力
         email_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//*[@id='mfid_user[email]']"))
+            EC.presence_of_element_located((By.XPATH, "//input[@type='email']"))
         )
         email_element.send_keys(email)
         time.sleep(1)
@@ -107,7 +107,7 @@ def login_selenium(email, password):
 
         # パスワード入力
         password_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//*[@id='mfid_user[password]']"))
+            EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
         )
         password_element.send_keys(password)
 
