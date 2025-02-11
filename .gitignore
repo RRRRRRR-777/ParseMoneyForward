@@ -10,8 +10,8 @@ wheels/
 .venv
 
 .DS_Store
-test*.py
 .env
 *.lock
 cookies.pkl
 job.log
+tmp/*
