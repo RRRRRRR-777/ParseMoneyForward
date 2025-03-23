@@ -12,6 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
+from logrelay.line_relay import LineRelay
 from random_user_agent.params import OperatingSystem, SoftwareName
 from random_user_agent.user_agent import UserAgent
 from selenium import webdriver
@@ -27,6 +28,12 @@ COOKIE_FILE = "cookies.pkl"
 SCREENSHOT_FILE = "reload_screenshot.png"
 global driver
 driver = None
+
+# LogRelayの初期化
+line_relay = LineRelay(
+    line_access_token=os.getenv("LINE_ACCESS_TOKEN"),
+    user_id=os.getenv("USER_ID"),
+)
 
 
 def save_cookies(driver, file_path):
@@ -722,6 +729,9 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"エラーが発生しました: {str(e)}")
         print(f"トレースバック: {traceback.format_exc()}")
+        line_relay.send_message("ParseMoneyForwardでエラーが発生しました")
+        line_relay.send_message(f"エラーが発生しました: {str(e)}")
+        line_relay.send_message(f"トレースバック: {traceback.format_exc()}")
     finally:
         if driver:
             driver.quit()
