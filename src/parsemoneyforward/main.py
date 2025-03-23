@@ -663,6 +663,9 @@ if __name__ == "__main__":
         PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
 
         chrome_options = Options()
+        # ユーザーデータの保存先を一意にする
+        unique_dir = f"/tmp/chrome_user_data_{os.getpid()}"
+        chrome_options.add_argument(f"--user-data-dir={unique_dir}")
         # ヘッドレスモードで起動する。
         chrome_options.add_argument("--headless=new")
         # ユーザーエージェントの指定。
@@ -676,7 +679,8 @@ if __name__ == "__main__":
         chrome_options.add_argument(
             f"--user-agent={user_agent_rotator.get_random_user_agent()}"
         )
-
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
         # ウィンドウの初期サイズを最大化。
         chrome_options.add_argument("--start-maximized")
         service = Service(executable_path="/snap/bin/chromium.chromedriver")
