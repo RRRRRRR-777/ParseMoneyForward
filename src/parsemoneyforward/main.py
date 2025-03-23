@@ -31,8 +31,8 @@ driver = None
 
 # LogRelayの初期化
 line_relay = LineRelay(
-    line_access_token=os.getenv("LINE_ACCESS_TOKEN"),
-    user_id=os.getenv("USER_ID"),
+    os.getenv("LINE_ACCESS_LOG_RELAY_TOKEN"),
+    os.getenv("USER_ID"),
 )
 
 
@@ -646,21 +646,35 @@ def calculate_balance(all_amount, current_month_balance, current_month_expense):
     return balance, stock
 
 
-def send_line_notify(context):
+def send_line_message(context):
     """LineNotifyでメッセージを送信する
 
     Args:
         context str: 送信する文字列
     """
     # APIのURLとトークン
-    url = "https://notify-api.line.me/api/notify"
+    LINE_API_URL = "https://api.line.me/v2/bot/message/push"
     load_dotenv(verbose=True)
-    LINE_NOTIFY_TOKEN = os.environ["LINE_NOTIFY_TOKEN"]
+    LINE_ACCESS_PARSE_MONEY_FORWORD_TOKEN = os.environ["LINE_ACCESS_PARSE_MONEY_FORWORD_TOKEN"]
+    USER_ID = os.environ["USER_ID"]
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_PARSE_MONEY_FORWORD_TOKEN}",
+    }
+    data = {
+        "to": USER_ID,
+        "messages": [{"type": "text", "text": context}],
+    }
 
     # メッセージを送信
-    headers = {"Authorization": "Bearer " + LINE_NOTIFY_TOKEN}
-    send_data = {"message": context}
-    requests.post(url, headers=headers, data=send_data)
+    try:
+        response = requests.post(
+            LINE_API_URL, headers=headers, json=data)
+        response.raise_for_status()  # HTTPエラーがある場合は例外を発生
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":
@@ -740,9 +754,9 @@ if __name__ == "__main__":
             all_amount, current_month_balance, current_month_expense
         )
         print(f"ラッキーマネー: {balance}\n証券口座:\n{stock}")
-        context = f"\n[ラッキーマネー]\n{balance}\n\n[現在の支出]\n{current_month_expense_formatted}\n\n[証券口座]\n{stock}"
+        context = f"[ラッキーマネー]\n{balance}\n\n[現在の支出]\n{current_month_expense_formatted}\n\n[証券口座]\n{stock}"
         print("LineNotifyに純資産の値を送信します")
-        send_line_notify(context)
+        send_line_message(context)
     except Exception as e:
         print(f"エラーが発生しました: {str(e)}")
         print(f"トレースバック: {traceback.format_exc()}")
