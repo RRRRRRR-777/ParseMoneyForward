@@ -104,7 +104,8 @@ def login_selenium(email, password):
     try:
         # Email入力
         email_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='email']"))
+            EC.presence_of_element_located(
+                (By.XPATH, "//input[@type='email']"))
         )
         email_element.send_keys(email)
         time.sleep(1)
@@ -115,7 +116,8 @@ def login_selenium(email, password):
 
         # パスワード入力
         password_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
+            EC.presence_of_element_located(
+                (By.XPATH, "//input[@type='password']"))
         )
         password_element.send_keys(password)
 
@@ -152,7 +154,8 @@ def click_reloads_selenium():
         Exception: ボタンのクリック中に発生したエラーを表示します。
     """
     try:
-        elms = driver.find_elements(By.XPATH, "//input[@data-disable-with='更新']")
+        elms = driver.find_elements(
+            By.XPATH, "//input[@data-disable-with='更新']")
         for elm in elms:
             elm.click()
             time.sleep(0.5)
@@ -216,10 +219,12 @@ def get_all_amount():
             # 口座名
             bank_name = li.find("a").text
             # 使用高
-            amount_ = li.find("ul", class_="amount").find("li", class_="number")
+            amount_ = li.find("ul", class_="amount").find(
+                "li", class_="number")
             amount = extract_number(amount_.text) if amount_ else 0
             # 残高
-            balance_ = li.find("ul", class_="amount").find("li", class_="balance")
+            balance_ = li.find("ul", class_="amount").find(
+                "li", class_="balance")
             balance = extract_number(balance_.text) if balance_ else 0
 
             account_data = {
@@ -313,7 +318,8 @@ class CreateMonthlyBalancePage:
             int: 取得した値。
         """
         return next(
-            (item for item in all_amount[key] if item["bank_name"] == bank_name),
+            (item for item in all_amount[key]
+             if item["bank_name"] == bank_name),
             default,
         )
 
@@ -331,7 +337,8 @@ class CreateMonthlyBalancePage:
         results = response.json().get("results", [])
 
         for result in results:
-            name = result["properties"]["名前"]["title"][0].get("plain_text", "N/A")
+            name = result["properties"]["名前"]["title"][0].get(
+                "plain_text", "N/A")
             price = result["properties"]["金額"].get("number", "N/A")
             notion_database.append({"name": name, "price": price})
 
@@ -467,7 +474,8 @@ class CreateMonthlyBalancePage:
             # database_idを取得して現在の残高を計算
             database_id = self.get_database_id_from_json(json_file_path)
             notion_database = self.get_database(database_id)
-            current_month_balance = sum(item["price"] for item in notion_database)
+            current_month_balance = sum(item["price"]
+                                        for item in notion_database)
 
             return current_month_balance
         # 給料日の処理
@@ -485,7 +493,8 @@ class CreateMonthlyBalancePage:
             )
             current_credit = card_data.get("number")
             next_credit = (
-                card_data.get("balance", 0) - current_credit if current_credit else None
+                card_data.get("balance", 0) -
+                current_credit if current_credit else None
             )
 
             # 環境変数から値を取得
@@ -594,7 +603,8 @@ def get_current_month_expense():
     driver.get(summary_url)
     soup = BeautifulSoup(driver.page_source, "html.parser")
     current_month_expense_ = (
-        soup.find("section", id="monthly-total").find("tbody").find_all("td")[-1]
+        soup.find(
+            "section", id="monthly-total").find("tbody").find_all("td")[-1]
     )
     current_month_expense = extract_number(
         current_month_expense_.text.replace("\n", "")
@@ -624,12 +634,14 @@ def calculate_balance(all_amount, current_month_balance, current_month_expense):
     for category, items in all_amount.items():
         for item in items:
             if category == "証券":
-                stock_list.append({"name": item["bank_name"], "price": item["number"]})
+                stock_list.append(
+                    {"name": item["bank_name"], "price": item["number"]})
 
     # 月初の残高 - 現在の支出
     balance_ = current_month_balance + current_month_expense
     balance = f"{balance_:,}円"
-    stock = "\n".join([f"{item['name']}: {item['price']:,}円" for item in stock_list])
+    stock = "\n".join(
+        [f"{item['name']}: {item['price']:,}円" for item in stock_list])
 
     return balance, stock
 
@@ -670,7 +682,8 @@ if __name__ == "__main__":
         chrome_options.add_argument("--headless=new")
         # ユーザーエージェントの指定。
         software_names = [SoftwareName.CHROME.value]
-        operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
+        operating_systems = [
+            OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
         user_agent_rotator = UserAgent(
             software_names=software_names,
             operating_systems=operating_systems,
