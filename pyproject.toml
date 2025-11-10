@@ -15,6 +15,7 @@ dependencies = [
     "jpholiday>=0.1.10",
     "python-dateutil>=2.9.0.post0",
     "logrelay>=0.2.0",
+    "pyotp>=2.9.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"

@@ -8,6 +8,7 @@ import traceback
 from pprint import pprint
 
 import jpholiday
+import pyotp
 import requests
 from bs4 import BeautifulSoup
 from dateutil.relativedelta import relativedelta
@@ -70,6 +71,22 @@ def add_cookies_to_driver(driver, cookies):
         driver.add_cookie(cookie)
 
 
+def get_totp_code():
+    """二段階認証コードを生成"""
+    totp_secret = os.environ.get("TOTP_SECRET")
+    if not totp_secret:
+        raise ValueError("TOTP_SECRETが設定されていません")
+
+    totp_secret = totp_secret.replace(" ", "").strip()
+
+    # Base32形式の検証
+    try:
+        totp = pyotp.TOTP(totp_secret)
+        return totp.now()
+    except Exception as e:
+        raise ValueError(f"TOTP_SECRETの形式が不正です: {e}")
+
+
 def is_logged_in():
     """
     Seleniumを使用して、ユーザーがログインしているかを確認します。
@@ -82,11 +99,122 @@ def is_logged_in():
     """
     url = "https://moneyforward.com/accounts"
     driver.get(url)
-    time.sleep(3)  # ページ読み込みを待機
-    # 現在のURLが/accountsかを確認
-    if driver.current_url == url:
+
+    # リダイレクトとJavaScriptレンダリングを待つ
+    time.sleep(10)
+
+    # 現在のURLを確認
+    current_url = driver.current_url
+    print(f"ログイン確認 - 現在のURL: {current_url}")
+
+    # /accountsまたは/にいればログイン成功
+    # /sign_in や /email_otp にリダイレクトされたらログイン失敗
+    if "/sign_in" in current_url or "/email_otp" in current_url:
+        return False
+    if "/accounts" in current_url or current_url == "https://moneyforward.com/":
         return True
+
     return False
+
+
+def _wait_for_page_load(driver, timeout=60):
+    """ページの読み込みとJavaScriptレンダリングを待機"""
+    email_element = WebDriverWait(driver, timeout).until(
+        EC.visibility_of_element_located((By.XPATH, "//input[@type='email']"))
+    )
+    body_count = len(driver.find_elements(By.XPATH, "//body//*"))
+    print(f"ページ読み込み完了 (要素数: {body_count})")
+    return email_element
+
+
+def _handle_page_load_error(driver):
+    """ページ読み込み失敗時のエラー処理"""
+    body_count = len(driver.find_elements(By.XPATH, "//body//*"))
+    driver.save_screenshot("debug_error_page.png")
+
+    print(f"\nログインページ読み込み失敗")
+    print(f"Body要素数: {body_count} (正常時: 107-108)")
+    print(f"スクリーンショット: debug_error_page.png")
+    print(f"原因: JavaScriptレンダリング失敗 (Raspberry Pi環境の制約)")
+    print(f"対処: PC環境でcookies.pklを取得してください\n")
+
+
+def _handle_totp_authentication(driver):
+    """TOTP二段階認証を処理"""
+    print("TOTP認証開始")
+    time.sleep(15)
+
+    # TOTP入力欄を探す
+    totp_element = None
+    for xpath in ["//input[@type='text']", "//input[@type='tel']", "//input"]:
+        try:
+            totp_element = WebDriverWait(driver, 5).until(
+                EC.visibility_of_element_located((By.XPATH, xpath))
+            )
+            break
+        except:
+            continue
+
+    if not totp_element:
+        raise Exception("TOTP入力欄が見つかりません")
+
+    # TOTPコード生成と入力
+    totp_code = get_totp_code()
+    print(f"TOTPコード: {totp_code}")
+    totp_element.send_keys(totp_code)
+    time.sleep(2)
+
+    # 送信ボタンをクリック
+    submit_button = None
+    for xpath in ["//button[@type='submit']", "//button"]:
+        try:
+            submit_button = WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            break
+        except:
+            continue
+
+    if not submit_button:
+        raise Exception("送信ボタンが見つかりません")
+
+    submit_button.click()
+    print("TOTP認証完了")
+    time.sleep(5)
+
+
+def _complete_login_and_save_cookies(driver):
+    """ログイン完了確認とクッキー保存
+
+    Args:
+        driver: Seleniumドライバー
+
+    Raises:
+        Exception: ログイン確認失敗時
+    """
+    # ログイン後、ページが完全に読み込まれるまで待機
+    WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//a[contains(@href, '/accounts')]")
+        )
+    )
+
+    print("ログイン成功。/accountsページに移動します...")
+
+    # /accountsページに実際に移動してからクッキーを保存
+    driver.get("https://moneyforward.com/accounts")
+    time.sleep(5)  # ページ読み込みとセッション確立を待つ
+
+    # 正常にログインできたか確認
+    if "/sign_in" in driver.current_url or "/email_otp" in driver.current_url:
+        print(f"警告: ログイン後のリダイレクトが失敗しました。現在のURL: {driver.current_url}")
+        raise Exception("ログインに失敗しました")
+
+    # クッキーを保存
+    save_cookies(driver, COOKIE_FILE)
+    print(f"✓ クッキーの保存が完了しました")
+    print(f"  保存先: {COOKIE_FILE}")
+    print(f"  現在のURL: {driver.current_url}")
 
 
 def login_selenium(email, password):
@@ -95,18 +223,26 @@ def login_selenium(email, password):
     Args:
         email str: moneyforwordのメールアドレス
         password str: moneyforwordのパスワード
-    """
 
+    Raises:
+        Exception: ログイン失敗時
+    """
     global driver
     login_url = "https://moneyforward.com/users/sign_in"
+
+    print("ログインページにアクセスします...")
     driver.get(login_url)
-    time.sleep(3)
+
+    # ページ読み込みとメール入力欄の検出
     try:
-        # Email入力
-        email_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//input[@type='email']"))
-        )
+        email_element = _wait_for_page_load(driver)
+    except Exception:
+        _handle_page_load_error(driver)
+        raise
+
+    try:
+        # メールアドレス入力
+        print("メールアドレスを入力します...")
         email_element.send_keys(email)
         time.sleep(1)
 
@@ -115,6 +251,7 @@ def login_selenium(email, password):
         time.sleep(1)
 
         # パスワード入力
+        print("パスワードを入力します...")
         password_element = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located(
                 (By.XPATH, "//input[@type='password']"))
@@ -123,23 +260,29 @@ def login_selenium(email, password):
 
         # ログインボタン押下
         driver.find_element(by=By.XPATH, value="//*[@id='submitto']").click()
+        time.sleep(5)
 
-        # ログイン後、ページが完全に読み込まれるまで待機
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//a[contains(@href, '/accounts')]")
+        print(f"認証後のURL: {driver.current_url}")
+
+        # メール認証（email_otp）が要求されているか確認
+        if "/email_otp" in driver.current_url:
+            raise Exception(
+                "メール認証が要求されています。\n"
+                "マネーフォワードで二段階認証（TOTP）を設定してください。\n"
+                "設定後、環境変数TOTP_SECRETにシークレットキーを設定してください。"
             )
-        )
 
-        time.sleep(3)  # 追加の待機時間
+        # 二段階認証コード入力（TOTP）
+        if "/two_factor_auth/totp" in driver.current_url or "/totp" in driver.current_url:
+            _handle_totp_authentication(driver)
+        else:
+            print(f"二段階認証は不要です。現在のURL: {driver.current_url}")
 
-        # 取得したクッキーを保存
-        save_cookies(driver, COOKIE_FILE)
-        print("ログイン後にクッキーの保存が完了しました。")
+        # ログイン完了とクッキー保存
+        _complete_login_and_save_cookies(driver)
 
     except Exception as e:
-        # Seleniumでのログイン失敗
-        print(f"Error during login: {e}")
+        print(f"ログインエラー: {e}")
         raise
 
 
@@ -279,12 +422,15 @@ class CreateMonthlyBalancePage:
             json_file_path (str): JSONファイルのパス。
 
         Returns:
-            str: JSON内のpage_idの値。
+            str: JSON内のpage_idの値。存在しない場合はNone。
         """
-        with open(json_file_path, "r") as json_file:
-            json_data = json.load(json_file)
-
-        return json_data.get("page_id")
+        try:
+            with open(json_file_path, "r") as json_file:
+                json_data = json.load(json_file)
+            return json_data.get("page_id")
+        except FileNotFoundError:
+            print(f"警告: {json_file_path} が見つかりません。新しいデータベースを作成します。")
+            return None
 
     def update_json_file(self, json_file_path, key, value):
         """
@@ -334,6 +480,10 @@ class CreateMonthlyBalancePage:
         url = f"https://api.notion.com/v1/databases/{database_id}/query"
 
         response = requests.post(url, headers=self.headers)
+        if response.status_code != 200:
+            print(
+                f"データベースの取得中にエラーが発生しました。ステータスコード: {response.status_code}"
+            )
         results = response.json().get("results", [])
 
         for result in results:
@@ -469,10 +619,23 @@ class CreateMonthlyBalancePage:
         current_month_balance = 0
         json_file_path = "month-page-id.json"
 
+        # # 暫定対応
+        # database_id = self.get_database_id_from_json(json_file_path)
+        # notion_database = self.get_database(database_id)
+        # current_month_balance = sum(item["price"]
+        #                             for item in notion_database)
+
+        # return current_month_balance
+
         # 給料日ではない日の処理
         if not self.is_payday():
             # database_idを取得して現在の残高を計算
             database_id = self.get_database_id_from_json(json_file_path)
+
+            if database_id is None:
+                print("database_idが見つかりません。残高を0として返します。")
+                return 0
+
             notion_database = self.get_database(database_id)
             current_month_balance = sum(item["price"]
                                         for item in notion_database)
@@ -708,27 +871,55 @@ if __name__ == "__main__":
         )
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        # Raspberry Piなどのリソース制約環境での安定動作のための追加オプション
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--enable-javascript")
+        chrome_options.add_argument("--disable-extensions")
         # ウィンドウの初期サイズを最大化。
         chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--window-size=1920,1080")
         service = Service(executable_path="/snap/bin/chromium.chromedriver")
         # chromedriverのパスを指定してサービスを作成
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # クッキーが存在するかを確認
+        # クッキーベースのログイン試行
+        cookie_loaded = False
         try:
             cookies = load_cookies(COOKIE_FILE)
-            driver.get(
-                "https://moneyforward.com"
-            )  # クッキーをセットするために一度サイトを開く
+            driver.get("https://moneyforward.com")
             add_cookies_to_driver(driver, cookies)
-            print("クッキーをロードしてサイトにアクセスしました。")
+            print("✓ クッキーをロードしました")
+            cookie_loaded = True
         except FileNotFoundError:
-            print("クッキーが見つかりません。通常のログインを行います。")
-            login_selenium(EMAIL, PASSWORD)
+            print("\n" + "=" * 80)
+            print("【警告】クッキーファイルが見つかりません")
+            print("=" * 80)
+            print(f"ファイル: {COOKIE_FILE}")
+            print()
+            print("クッキーなしでログインを試みますが、この環境では")
+            print("JavaScriptレンダリングが非常に不安定です。")
+            print()
+            print("【環境的な制約】")
+            print("  • Raspberry Pi (ARM) + Snap Chromium + ヘッドレスモード")
+            print("  • MoneyForwardのSPAは完全なJavaScript実行が必要")
+            print("  • リソース不足により、ほとんどの場合ログインに失敗します")
+            print()
+            print("【対処方法】")
+            print("  成功率を上げるには、PC環境でログインしてcookies.pklを")
+            print("  取得することを強く推奨します。")
+            print("  （成功すればクッキーが保存され、次回以降は安定動作）")
+            print("=" * 80 + "\n")
 
-        # ログインチェック
-        if not is_logged_in():
-            print("クッキーが無効です。通常のログインを実行します。")
+        # ログイン状態確認
+        if cookie_loaded and is_logged_in():
+            print("✓ クッキーでログイン成功")
+        else:
+            if cookie_loaded:
+                print("クッキーが無効です。通常のログインを実行します。")
+            else:
+                print("クッキーなしでログインを試みます...")
             login_selenium(EMAIL, PASSWORD)
 
         # 口座の更新
