@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import os
 import pickle
@@ -8,6 +9,7 @@ import traceback
 from pprint import pprint
 
 import jpholiday
+import pyotp
 import requests
 from bs4 import BeautifulSoup
 from dateutil.relativedelta import relativedelta
@@ -19,6 +21,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -26,6 +29,9 @@ load_dotenv(verbose=True)
 
 COOKIE_FILE = "cookies.pkl"
 SCREENSHOT_FILE = "reload_screenshot.png"
+CHROMEDRIVER_PATH = os.environ.get(
+    "CHROMEDRIVER_PATH", "/snap/bin/chromium.chromedriver"
+)
 global driver
 driver = None
 
@@ -34,6 +40,114 @@ line_relay = LineRelay(
     os.getenv("LINE_ACCESS_LOG_RELAY_TOKEN"),
     os.getenv("USER_ID"),
 )
+
+DEFAULT_LOGIN_ENTRYPOINT = "https://moneyforward.com/users/sign_in"
+FALLBACK_LOGIN_URL = "https://id.moneyforward.com/sign_in/email"
+
+
+def resolve_login_url():
+    """サーバ側のリダイレクトを辿って安定したログインURLを取得"""
+    try:
+        resp = requests.get(
+            DEFAULT_LOGIN_ENTRYPOINT,
+            allow_redirects=True,
+            timeout=10,
+        )
+        if resp.ok and resp.url:
+            return resp.url
+    except requests.RequestException as e:
+        print(f"ログインURLの解決に失敗しました: {e}")
+    return FALLBACK_LOGIN_URL
+
+
+def build_chrome_options():
+    """Chromeのオプションを構築する"""
+    chrome_options = Options()
+    chrome_prefs = {
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.managed_default_content_settings.images": 2,
+    }
+    chrome_options.add_experimental_option("prefs", chrome_prefs)
+
+    unique_dir = f"/tmp/chrome_user_data_{os.getpid()}"
+    chrome_options.add_argument(f"--user-data-dir={unique_dir}")
+    chrome_options.add_argument("--headless=new")
+
+    software_names = [SoftwareName.CHROME.value]
+    operating_systems = [
+        OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
+    user_agent_rotator = UserAgent(
+        software_names=software_names,
+        operating_systems=operating_systems,
+        limit=100,
+    )
+    chrome_options.add_argument(
+        f"--user-agent={user_agent_rotator.get_random_user_agent()}"
+    )
+
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--enable-javascript")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-sync")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-client-side-phishing-detection")
+    chrome_options.add_argument("--disable-component-update")
+    chrome_options.add_argument("--disable-default-apps")
+    chrome_options.add_argument("--disable-popup-blocking")
+    chrome_options.add_argument("--metrics-recording-only")
+    chrome_options.add_argument("--no-first-run")
+    chrome_options.add_argument("--safebrowsing-disable-auto-update")
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    return chrome_options
+
+
+def create_webdriver():
+    """chromedriverのインスタンスを生成する"""
+    options = build_chrome_options()
+    service = Service(executable_path=CHROMEDRIVER_PATH)
+    return webdriver.Chrome(service=service, options=options)
+
+
+def attempt_cookie_login():
+    """保存済みクッキーによるログインを試みる"""
+    if driver is None:
+        raise RuntimeError("WebDriverが初期化されていません")
+
+    try:
+        cookies = load_cookies(COOKIE_FILE)
+    except FileNotFoundError:
+        return False
+
+    driver.get("https://moneyforward.com")
+    add_cookies_to_driver(driver, cookies)
+    driver.refresh()  # クッキーを適用するためにページをリフレッシュ
+    time.sleep(2)  # リフレッシュ後のページ読み込み待機
+    print("✓ クッキーをロードしました")
+    return True
+
+
+def ensure_logged_in(email, password):
+    """クッキー / 通常ログインのいずれかでログイン状態を確立する"""
+    cookie_loaded = attempt_cookie_login()
+
+    if cookie_loaded and is_logged_in():
+        print("✓ クッキーでログイン成功")
+        return
+
+    if cookie_loaded:
+        print("クッキーが無効です。ログインを実行します。")
+
+    login_selenium(email, password)
 
 
 def save_cookies(driver, file_path):
@@ -65,9 +179,58 @@ def add_cookies_to_driver(driver, cookies):
     """
     driver.delete_all_cookies()  # 既存のクッキーをクリア
     for cookie in cookies:
-        if "domain" in cookie:
-            del cookie["domain"]
-        driver.add_cookie(cookie)
+        # 元のcookieを変更しないようにコピーする
+        cookie_copy = cookie.copy()
+        # domain属性を削除（Seleniumが自動的に現在のドメインを設定する）
+        if "domain" in cookie_copy:
+            del cookie_copy["domain"]
+        # sameSite属性が'None'の場合、削除する（Seleniumの互換性のため）
+        if cookie_copy.get("sameSite") == "None":
+            del cookie_copy["sameSite"]
+        driver.add_cookie(cookie_copy)
+
+
+def _get_normalized_totp_secret():
+    totp_secret = os.environ.get("TOTP_SECRET")
+    if not totp_secret:
+        return None
+    normalized_secret = totp_secret.replace(" ", "").strip()
+    return normalized_secret or None
+
+
+def get_totp_code():
+    """二段階認証コードを生成し、デバッグ情報も返す"""
+    normalized_secret = _get_normalized_totp_secret()
+    if not normalized_secret:
+        raise ValueError("TOTP_SECRETが設定されていません")
+
+    secret_length = len(normalized_secret)
+
+    try:
+        totp = pyotp.TOTP(normalized_secret)
+        current_epoch = int(time.time())
+        time_remaining = totp.interval - (current_epoch % totp.interval)
+        if time_remaining < 5:
+            wait_time = time_remaining + 1
+            print(f"TOTPコード更新待ち ({wait_time}秒)...")
+            time.sleep(wait_time)
+            current_epoch = int(time.time())
+            time_remaining = totp.interval - (current_epoch % totp.interval)
+
+        code = totp.now()
+        secret_checksum = hashlib.sha256(
+            normalized_secret.encode("utf-8")
+        ).hexdigest()[:12]
+        debug_info = {
+            "utc_time": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "timestamp": current_epoch,
+            "time_remaining": time_remaining,
+            "secret_length": secret_length,
+            "secret_checksum": secret_checksum,
+        }
+        return code, debug_info
+    except Exception as e:
+        raise ValueError(f"TOTP_SECRETの形式が不正です: {e}")
 
 
 def is_logged_in():
@@ -82,11 +245,250 @@ def is_logged_in():
     """
     url = "https://moneyforward.com/accounts"
     driver.get(url)
-    time.sleep(3)  # ページ読み込みを待機
-    # 現在のURLが/accountsかを確認
-    if driver.current_url == url:
+
+    # リダイレクトとJavaScriptレンダリングを待つ
+    time.sleep(10)
+
+    # 現在のURLを確認
+    current_url = driver.current_url
+    print(f"ログイン確認 - 現在のURL: {current_url}")
+
+    # /accountsまたは/にいればログイン成功
+    # /sign_in や /email_otp にリダイレクトされたらログイン失敗
+    if "/sign_in" in current_url or "/email_otp" in current_url:
+        return False
+    if "/accounts" in current_url or current_url == "https://moneyforward.com/":
         return True
+
     return False
+
+
+def _wait_for_page_load(driver, timeout=60, max_attempts=3):
+    """ページの読み込みとJavaScriptレンダリングを待機"""
+    attempt_timeout = max(15, timeout // max_attempts)  # 最小15秒に延長
+    last_exception = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # ページ読み込み待機を追加
+            time.sleep(3)
+            email_element = WebDriverWait(driver, attempt_timeout).until(
+                EC.visibility_of_element_located((By.XPATH, "//input[@type='email']"))
+            )
+            body_count = len(driver.find_elements(By.XPATH, "//body//*"))
+            print(f"ページ読み込み完了 (要素数: {body_count})")
+            return email_element
+        except TimeoutException as e:
+            last_exception = e
+            # デバッグ用スクリーンショット
+            try:
+                screenshot_name = f"debug_login_page_retry{attempt-1}.png"
+                driver.save_screenshot(screenshot_name)
+                print(f"デバッグ用スクリーンショット保存: {screenshot_name}")
+            except:
+                pass
+            if attempt == max_attempts:
+                break
+            print(f"メール入力欄の検出に失敗しました ({attempt}/{max_attempts})。ページを再読み込みします...")
+            driver.refresh()
+            time.sleep(5)  # リフレッシュ後の待機時間を延長
+
+    raise last_exception
+
+
+def _dump_debug_page(driver, label):
+    """デバッグ用に現在のHTMLを保存"""
+    timestamp = int(time.time())
+    path = f"/tmp/mf_debug_{label}_{timestamp}.html"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        print(f"デバッグ用HTMLを保存しました: {path}")
+    except Exception as e:
+        print(f"デバッグHTMLの保存に失敗しました: {e}")
+
+
+def _handle_totp_authentication(driver, max_attempts=3):
+    """TOTP二段階認証を処理"""
+    print("TOTP認証開始")
+    time.sleep(5)
+
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n--- TOTP試行 {attempt}/{max_attempts} ---")
+
+        # TOTP_SECRETからコードを生成
+        totp_code, totp_debug = get_totp_code()
+        print(f"生成されたコード: {totp_code} | 残り{totp_debug['time_remaining']}秒")
+
+        try:
+            # TOTP入力欄を探す
+            totp_input = None
+            try:
+                totp_input = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[inputmode='numeric']"))
+                )
+                print("✓ TOTP入力欄を検出")
+            except:
+                try:
+                    totp_input = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='tel']"))
+                    )
+                    print("✓ TOTP入力欄を検出 (tel type)")
+                except:
+                    pass
+
+            if not totp_input:
+                print("エラー: TOTP入力欄が見つかりません")
+                if attempt == max_attempts:
+                    raise Exception("TOTP入力欄が見つかりませんでした")
+                time.sleep(5)
+                continue
+
+            # コードを入力
+            print(f"コードを入力: {totp_code}")
+            totp_input.clear()
+            totp_input.send_keys(totp_code)
+            time.sleep(1)
+
+            # 送信ボタンを探してクリック
+            submit_button = None
+            try:
+                submit_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit']")
+                print("✓ 送信ボタンを検出")
+            except:
+                try:
+                    submit_button = driver.find_element(By.XPATH, "//button")
+                    print("✓ 送信ボタンを検出 (汎用)")
+                except:
+                    pass
+
+            if not submit_button:
+                print("エラー: 送信ボタンが見つかりません")
+                if attempt == max_attempts:
+                    raise Exception("送信ボタンが見つかりませんでした")
+                time.sleep(5)
+                continue
+
+            # ボタンをクリック
+            print("送信ボタンをクリック...")
+            submit_button.click()
+            time.sleep(2)
+
+            # 認証完了を待つ
+            print("認証結果を待機中...")
+            try:
+                WebDriverWait(driver, 30).until(
+                    lambda d: not d.current_url.startswith("https://id.moneyforward.com/two_factor_auth")
+                )
+                print("✓ TOTP認証成功")
+                return
+            except TimeoutException:
+                error_elements = driver.find_elements(
+                    By.XPATH, "//p[contains(text(), 'コードが間違っています')]"
+                )
+                if error_elements and attempt < max_attempts:
+                    print("✗ TOTPコードが拒否されました。次のコードで再試行します...")
+                    time.sleep(5)
+                    continue
+                raise Exception("TOTP認証を完了できませんでした")
+
+        except Exception as e:
+            print(f"エラー: {e}")
+            if attempt == max_attempts:
+                raise
+            time.sleep(5)
+
+
+def _complete_login_and_save_cookies(driver):
+    """ログイン完了確認とクッキー保存
+
+    Args:
+        driver: Seleniumドライバー
+
+    Raises:
+        Exception: ログイン確認失敗時
+    """
+    print(f"ログイン完了確認を開始します。現在のURL: {driver.current_url}")
+
+    target_xpath = "//a[contains(@href, 'moneyforward.com')]"
+
+    def _is_portal_ready(d):
+        current = d.current_url or ""
+        return (
+            current.startswith("https://moneyforward.com")
+            or len(d.find_elements(By.XPATH, target_xpath)) > 0
+        )
+
+    try:
+        WebDriverWait(driver, 60).until(_is_portal_ready)
+    except TimeoutException:
+        print("ログイン後の遷移要素が見つかりませんでした。")
+        _dump_debug_page(driver, "login_timeout")
+        raise
+
+    if not driver.current_url.startswith("https://moneyforward.com"):
+        portal_links = driver.find_elements(By.XPATH, target_xpath)
+        if not portal_links:
+            raise Exception("マネーフォワード本体へのリンクが検出できません")
+
+        target_link = portal_links[0]
+        for link in portal_links:
+            href = (link.get_attribute("href") or "").strip()
+            print(f"検出したリンク: {href}")
+            if "auth" in href or "callback" in href:
+                target_link = link
+                break
+
+        print("マネーフォワード本体へのリンクをクリックします...")
+        driver.execute_script("arguments[0].click();", target_link)
+        WebDriverWait(driver, 60).until(
+            lambda d: (d.current_url or "").startswith(
+                "https://moneyforward.com"))
+
+    # account_selectorページを処理
+    if "/account_selector" in driver.current_url:
+        print("アカウント選択ページを検出しました。最初のアカウントを選択します...")
+        try:
+            # アカウント選択ボタンを探す（複数ある場合は最初のものを選択）
+            account_buttons = driver.find_elements(By.XPATH, "//a[contains(@href, 'moneyforward.com')]")
+            if account_buttons:
+                print(f"{len(account_buttons)}個のアカウントが見つかりました。最初のアカウントを選択します...")
+                driver.execute_script("arguments[0].click();", account_buttons[0])
+                time.sleep(5)
+                print(f"アカウント選択後のURL: {driver.current_url}")
+            else:
+                print("警告: アカウント選択ボタンが見つかりませんでした")
+        except Exception as e:
+            print(f"アカウント選択中にエラーが発生しました: {e}")
+
+    if "/accounts" not in driver.current_url:
+        print("accountsページへ直接遷移します...")
+        driver.get("https://moneyforward.com/accounts")
+        time.sleep(10)  # ページ読み込みを待つ
+
+    # accountsページへの遷移を確認（柔軟なチェック）
+    print(f"ページ遷移確認中... 現在のURL: {driver.current_url}")
+
+    # タイムアウトを延長し、エラーをキャッチ
+    try:
+        WebDriverWait(driver, 90).until(
+            lambda d: "/accounts" in d.current_url or "/bs/home" in d.current_url
+        )
+    except TimeoutException:
+        # タイムアウトしても、ログインページでなければ成功とみなす
+        if "/sign_in" not in driver.current_url and "/email_otp" not in driver.current_url:
+            print(f"警告: accountsページへの遷移がタイムアウトしましたが、ログイン状態は確立されています")
+        else:
+            print(f"エラー: ログインに失敗しました。現在のURL: {driver.current_url}")
+            raise Exception("ログインに失敗しました")
+
+    time.sleep(5)  # セッション確立を待つ
+
+    # クッキーを保存
+    save_cookies(driver, COOKIE_FILE)
+    print(f"✓ クッキーの保存が完了しました")
+    print(f"  保存先: {COOKIE_FILE}")
+    print(f"  現在のURL: {driver.current_url}")
 
 
 def login_selenium(email, password):
@@ -95,52 +497,79 @@ def login_selenium(email, password):
     Args:
         email str: moneyforwordのメールアドレス
         password str: moneyforwordのパスワード
+
+    Raises:
+        Exception: ログイン失敗時
     """
-
     global driver
-    login_url = "https://moneyforward.com/users/sign_in"
-    driver.get(login_url)
-    time.sleep(3)
-    try:
-        # Email入力
-        email_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//input[@type='email']"))
-        )
-        email_element.send_keys(email)
-        time.sleep(1)
 
-        # [ログインする]ボタン押下(パスワード入力前に必要)
-        driver.find_element(by=By.XPATH, value="//*[@id='submitto']").click()
-        time.sleep(1)
+    max_login_attempts = 3
 
-        # パスワード入力
-        password_element = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//input[@type='password']"))
-        )
-        password_element.send_keys(password)
+    for attempt in range(1, max_login_attempts + 1):
+        login_url = resolve_login_url()
+        print(f"\n=== ログイン試行 {attempt}/{max_login_attempts} ===")
+        print(f"ログインページにアクセスします... ({login_url})")
+        driver.get(login_url)
 
-        # ログインボタン押下
-        driver.find_element(by=By.XPATH, value="//*[@id='submitto']").click()
+        # ページ読み込みとメール入力欄の検出
+        try:
+            email_element = _wait_for_page_load(driver)
+        except Exception as e:
+            print(f"ページ読み込みエラー: {e}")
+            if attempt == max_login_attempts:
+                raise
+            print("ページ読み込みに失敗したため再試行します...")
+            continue
 
-        # ログイン後、ページが完全に読み込まれるまで待機
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//a[contains(@href, '/accounts')]")
+        try:
+            # メールアドレス入力
+            print("メールアドレスを入力します...")
+            email_element.send_keys(email)
+            time.sleep(1)
+
+            # [ログインする]ボタン押下(パスワード入力前に必要)
+            driver.find_element(by=By.XPATH, value="//*[@id='submitto']").click()
+            time.sleep(1)
+
+            # パスワード入力
+            print("パスワードを入力します...")
+            password_element = WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//input[@type='password']"))
             )
-        )
+            password_element.send_keys(password)
 
-        time.sleep(3)  # 追加の待機時間
+            # ログインボタン押下
+            driver.find_element(by=By.XPATH, value="//*[@id='submitto']").click()
+            time.sleep(5)
 
-        # 取得したクッキーを保存
-        save_cookies(driver, COOKIE_FILE)
-        print("ログイン後にクッキーの保存が完了しました。")
+            print(f"認証後のURL: {driver.current_url}")
 
-    except Exception as e:
-        # Seleniumでのログイン失敗
-        print(f"Error during login: {e}")
-        raise
+            # メール認証（email_otp）が要求されているか確認
+            if "/email_otp" in driver.current_url:
+                raise Exception(
+                    "メール認証が要求されています。\n"
+                    "マネーフォワードで二段階認証（TOTP）を設定してください。\n"
+                    "設定後、環境変数TOTP_SECRETにシークレットキーを設定してください。"
+                )
+
+            # 二段階認証コード入力（TOTP）
+            if "/two_factor_auth/totp" in driver.current_url or "/totp" in driver.current_url:
+                _handle_totp_authentication(driver)
+            else:
+                print(f"二段階認証は不要です。現在のURL: {driver.current_url}")
+
+            # ログイン完了とクッキー保存
+            _complete_login_and_save_cookies(driver)
+            return
+
+        except Exception as e:
+            print(f"ログインエラー: {e}")
+            if attempt == max_login_attempts:
+                raise
+            print("再試行のためにログインフローをリセットします...")
+            driver.delete_all_cookies()
+            time.sleep(5)
 
 
 def click_reloads_selenium():
@@ -153,16 +582,41 @@ def click_reloads_selenium():
     Raises:
         Exception: ボタンのクリック中に発生したエラーを表示します。
     """
+    # トップページにアクセス
+    toppage_url = "https://moneyforward.com"
+    print(f"トップページにアクセスします: {toppage_url}")
+    driver.get(toppage_url)
+
+    # ページが完全に読み込まれるまで待機
+    print("ページの読み込みを待機中...")
+    time.sleep(5)
+
+    # account_selectorに戻された場合の処理
+    if "/account_selector" in driver.current_url:
+        print("警告: account_selectorページにリダイレクトされました")
+        try:
+            account_buttons = driver.find_elements(By.XPATH, "//a[contains(@href, 'moneyforward.com')]")
+            if account_buttons:
+                print(f"アカウントを再選択します...")
+                driver.execute_script("arguments[0].click();", account_buttons[0])
+                time.sleep(5)
+        except Exception as e:
+            print(f"アカウント再選択エラー: {e}")
+
+    print(f"現在のURL: {driver.current_url}")
+
     try:
         elms = driver.find_elements(
             By.XPATH, "//input[@data-disable-with='更新']")
+        print(f"{len(elms)}個の更新ボタンが見つかりました")
         for elm in elms:
             elm.click()
-            time.sleep(0.5)
+            time.sleep(1)  # 各更新処理の完了を待つ
+        if len(elms) > 0:
+            print("すべての更新ボタンをクリックしました。更新処理の完了を待ちます...")
+            time.sleep(5)  # すべての更新処理が完了するまで待機
     except Exception as e:
         print(f"更新ボタンのクリック中にエラーが発生しました。\n{e}")
-    finally:
-        time.sleep(3)
 
 
 def extract_number(text):
@@ -188,8 +642,42 @@ def get_all_amount():
     Returns:
         str: 口座の値
     """
+    # 現在のURLを確認し、トップページにいない場合のみアクセス
     toppage_url = "https://moneyforward.com"
-    driver.get(toppage_url)
+    current_url = driver.current_url or ""
+
+    if not current_url.startswith(toppage_url) or "/account_selector" in current_url:
+        print(f"トップページに遷移します（現在: {current_url}）")
+        driver.get(toppage_url)
+        time.sleep(5)  # ページ読み込み待機を延長
+
+        # account_selectorに戻された場合の処理
+        if "/account_selector" in driver.current_url:
+            print("account_selectorページが表示されました。アカウントを選択します...")
+            try:
+                account_buttons = driver.find_elements(By.XPATH, "//a[contains(@href, 'moneyforward.com')]")
+                if account_buttons:
+                    driver.execute_script("arguments[0].click();", account_buttons[0])
+                    time.sleep(5)
+            except Exception as e:
+                print(f"アカウント選択エラー: {e}")
+
+    print(f"口座情報の取得を開始します。現在のURL: {driver.current_url}")
+
+    # registered-accounts要素が表示されるまで待機
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "registered-accounts"))
+        )
+        print("✓ registered-accounts要素が見つかりました")
+    except Exception as e:
+        print(f"Warning: 'registered-accounts' section not loaded within timeout: {e}")
+        # デバッグ用スクリーンショット
+        try:
+            driver.save_screenshot("debug_get_all_amount.png")
+            print("デバッグ用スクリーンショットを保存しました: debug_get_all_amount.png")
+        except:
+            pass
 
     # Beautiful Soupでパース
     soup = BeautifulSoup(driver.page_source, "html.parser")
@@ -279,12 +767,15 @@ class CreateMonthlyBalancePage:
             json_file_path (str): JSONファイルのパス。
 
         Returns:
-            str: JSON内のpage_idの値。
+            str: JSON内のpage_idの値。存在しない場合はNone。
         """
-        with open(json_file_path, "r") as json_file:
-            json_data = json.load(json_file)
-
-        return json_data.get("page_id")
+        try:
+            with open(json_file_path, "r") as json_file:
+                json_data = json.load(json_file)
+            return json_data.get("page_id")
+        except FileNotFoundError:
+            print(f"警告: {json_file_path} が見つかりません。新しいデータベースを作成します。")
+            return None
 
     def update_json_file(self, json_file_path, key, value):
         """
@@ -334,6 +825,10 @@ class CreateMonthlyBalancePage:
         url = f"https://api.notion.com/v1/databases/{database_id}/query"
 
         response = requests.post(url, headers=self.headers)
+        if response.status_code != 200:
+            print(
+                f"データベースの取得中にエラーが発生しました。ステータスコード: {response.status_code}"
+            )
         results = response.json().get("results", [])
 
         for result in results:
@@ -469,10 +964,23 @@ class CreateMonthlyBalancePage:
         current_month_balance = 0
         json_file_path = "month-page-id.json"
 
+        # # 暫定対応
+        # database_id = self.get_database_id_from_json(json_file_path)
+        # notion_database = self.get_database(database_id)
+        # current_month_balance = sum(item["price"]
+        #                             for item in notion_database)
+
+        # return current_month_balance
+
         # 給料日ではない日の処理
         if not self.is_payday():
             # database_idを取得して現在の残高を計算
             database_id = self.get_database_id_from_json(json_file_path)
+
+            if database_id is None:
+                print("database_idが見つかりません。残高を0として返します。")
+                return 0
+
             notion_database = self.get_database(database_id)
             current_month_balance = sum(item["price"]
                                         for item in notion_database)
@@ -600,12 +1108,56 @@ def get_current_month_expense():
         int: 現在の月の支出合計を数値として返します。
     """
     summary_url = "https://moneyforward.com/cf/summary"
+    print(f"支出サマリページにアクセスします: {summary_url}")
     driver.get(summary_url)
+    time.sleep(5)  # ページ読み込み待機
+
+    # account_selectorに戻された場合の処理
+    if "/account_selector" in driver.current_url:
+        print("account_selectorページが表示されました。アカウントを選択します...")
+        try:
+            account_buttons = driver.find_elements(By.XPATH, "//a[contains(@href, 'moneyforward.com')]")
+            if account_buttons:
+                driver.execute_script("arguments[0].click();", account_buttons[0])
+                time.sleep(5)
+                # 再度サマリページにアクセス
+                driver.get(summary_url)
+                time.sleep(5)
+        except Exception as e:
+            print(f"アカウント選択エラー: {e}")
+
+    print(f"現在のURL: {driver.current_url}")
+
+    # monthly-total要素が表示されるまで待機
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "monthly-total"))
+        )
+        print("✓ monthly-total要素が見つかりました")
+    except Exception as e:
+        print(f"Warning: 'monthly-total' section not loaded within timeout: {e}")
+        # デバッグ用スクリーンショット
+        try:
+            driver.save_screenshot("debug_get_current_month_expense.png")
+            print("デバッグ用スクリーンショットを保存しました: debug_get_current_month_expense.png")
+        except:
+            pass
+
     soup = BeautifulSoup(driver.page_source, "html.parser")
-    current_month_expense_ = (
-        soup.find(
-            "section", id="monthly-total").find("tbody").find_all("td")[-1]
-    )
+    monthly_total_section = soup.find("section", id="monthly-total")
+
+    if not monthly_total_section:
+        raise Exception("'monthly-total' section not found in page")
+
+    tbody = monthly_total_section.find("tbody")
+    if not tbody:
+        raise Exception("'tbody' not found in monthly-total section")
+
+    td_elements = tbody.find_all("td")
+    if not td_elements:
+        raise Exception("No 'td' elements found in tbody")
+
+    current_month_expense_ = td_elements[-1]
     current_month_expense = extract_number(
         current_month_expense_.text.replace("\n", "")
     )
@@ -677,84 +1229,50 @@ def send_line_message(context):
         return {"error": str(e)}
 
 
-if __name__ == "__main__":
+def main():
     load_dotenv(verbose=True)
+
+    # 環境変数の値を読み込む
+    EMAIL = os.environ["EMAIL"]
+    PASSWORD = os.environ["PASSWORD"]
+    NOTION_TOKEN = os.environ["NOTION_KEY"]
+    PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
+
+    global driver
+    driver = None
+
     try:
-        # 環境変数の値を読み込む
-        EMAIL = os.environ["EMAIL"]
-        PASSWORD = os.environ["PASSWORD"]
-        # Notionの認証トークン
-        NOTION_TOKEN = os.environ["NOTION_KEY"]
-        # 親ページのID
-        PARENT_PAGE_ID = os.environ["NOTION_PAGE_ID"]
+        driver = create_webdriver()
 
-        chrome_options = Options()
-        # ユーザーデータの保存先を一意にする
-        unique_dir = f"/tmp/chrome_user_data_{os.getpid()}"
-        chrome_options.add_argument(f"--user-data-dir={unique_dir}")
-        # ヘッドレスモードで起動する。
-        chrome_options.add_argument("--headless=new")
-        # ユーザーエージェントの指定。
-        software_names = [SoftwareName.CHROME.value]
-        operating_systems = [
-            OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
-        user_agent_rotator = UserAgent(
-            software_names=software_names,
-            operating_systems=operating_systems,
-            limit=100,
-        )
-        chrome_options.add_argument(
-            f"--user-agent={user_agent_rotator.get_random_user_agent()}"
-        )
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        # ウィンドウの初期サイズを最大化。
-        chrome_options.add_argument("--start-maximized")
-        service = Service(executable_path="/snap/bin/chromium.chromedriver")
-        # chromedriverのパスを指定してサービスを作成
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        ensure_logged_in(EMAIL, PASSWORD)
 
-        # クッキーが存在するかを確認
-        try:
-            cookies = load_cookies(COOKIE_FILE)
-            driver.get(
-                "https://moneyforward.com"
-            )  # クッキーをセットするために一度サイトを開く
-            add_cookies_to_driver(driver, cookies)
-            print("クッキーをロードしてサイトにアクセスしました。")
-        except FileNotFoundError:
-            print("クッキーが見つかりません。通常のログインを行います。")
-            login_selenium(EMAIL, PASSWORD)
-
-        # ログインチェック
-        if not is_logged_in():
-            print("クッキーが無効です。通常のログインを実行します。")
-            login_selenium(EMAIL, PASSWORD)
-
-        # 口座の更新
         print("リロードボタンを押下します")
         click_reloads_selenium()
 
-        # Lineに値を送信
         all_amount = get_all_amount()
         print("マネーフォワードの口座:")
         pprint(all_amount)
-        # Notionから値を取得
+
         create_monthly_balance_page = CreateMonthlyBalancePage(
             NOTION_TOKEN, PARENT_PAGE_ID
         )
         current_month_balance = create_monthly_balance_page.main(all_amount)
         print(f"月初の残高: {current_month_balance}")
-        # 現在の支出を取得
+
         current_month_expense = get_current_month_expense()
         current_month_expense_formatted = "{:,}".format(current_month_expense)
         print(f"現在の支出: {current_month_expense_formatted}")
-        # 現在の残高を計算
+
         balance, stock = calculate_balance(
             all_amount, current_month_balance, current_month_expense
         )
         print(f"ラッキーマネー: {balance}\n証券口座:\n{stock}")
-        context = f"[ラッキーマネー]\n{balance}\n\n[現在の支出]\n{current_month_expense_formatted}\n\n[証券口座]\n{stock}"
+
+        context = (
+            f"[ラッキーマネー]\n{balance}\n\n"
+            f"[現在の支出]\n{current_month_expense_formatted}\n\n"
+            f"[証券口座]\n{stock}"
+        )
         print("LineNotifyに純資産の値を送信します")
         send_line_message(context)
     except Exception as e:
@@ -766,3 +1284,7 @@ if __name__ == "__main__":
     finally:
         if driver:
             driver.quit()
+
+
+if __name__ == "__main__":
+    main()
