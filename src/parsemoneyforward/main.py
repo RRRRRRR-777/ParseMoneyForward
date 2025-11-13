@@ -61,21 +61,19 @@ def resolve_login_url():
 
 
 def build_chrome_options():
-    """Chromeのオプションを構築する"""
+    """Chromeのオプションを構築する（シンプル版）"""
     chrome_options = Options()
-    chrome_prefs = {
-        "profile.default_content_setting_values.notifications": 2,
-        "profile.managed_default_content_settings.images": 2,
-    }
-    chrome_options.add_experimental_option("prefs", chrome_prefs)
 
+    # ユーザーデータの保存先を一意にする
     unique_dir = f"/tmp/chrome_user_data_{os.getpid()}"
     chrome_options.add_argument(f"--user-data-dir={unique_dir}")
+
+    # ヘッドレスモードで起動する
     chrome_options.add_argument("--headless=new")
 
+    # ユーザーエージェントの指定
     software_names = [SoftwareName.CHROME.value]
-    operating_systems = [
-        OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
+    operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
     user_agent_rotator = UserAgent(
         software_names=software_names,
         operating_systems=operating_systems,
@@ -87,26 +85,9 @@ def build_chrome_options():
 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--enable-javascript")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--disable-background-timer-throttling")
-    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_options.add_argument("--disable-renderer-backgrounding")
-    chrome_options.add_argument("--disable-client-side-phishing-detection")
-    chrome_options.add_argument("--disable-component-update")
-    chrome_options.add_argument("--disable-default-apps")
-    chrome_options.add_argument("--disable-popup-blocking")
-    chrome_options.add_argument("--metrics-recording-only")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--safebrowsing-disable-auto-update")
+
+    # ウィンドウの初期サイズを最大化
     chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--window-size=1920,1080")
 
     return chrome_options
 
@@ -454,35 +435,31 @@ def _complete_login_and_save_cookies(driver):
             if account_buttons:
                 print(f"{len(account_buttons)}個のアカウントが見つかりました。最初のアカウントを選択します...")
                 driver.execute_script("arguments[0].click();", account_buttons[0])
-                time.sleep(5)
-                print(f"アカウント選択後のURL: {driver.current_url}")
+                time.sleep(3)
+                # アカウント選択後、マネーフォワード本体への遷移を待つ
+                print("アカウント選択後の遷移を待機中...")
+                WebDriverWait(driver, 30).until(
+                    lambda d: "moneyforward.com" in d.current_url and "/account_selector" not in d.current_url
+                )
+                print(f"✓ アカウント選択後のURL: {driver.current_url}")
             else:
                 print("警告: アカウント選択ボタンが見つかりませんでした")
         except Exception as e:
             print(f"アカウント選択中にエラーが発生しました: {e}")
 
-    if "/accounts" not in driver.current_url:
-        print("accountsページへ直接遷移します...")
-        driver.get("https://moneyforward.com/accounts")
-        time.sleep(10)  # ページ読み込みを待つ
+    # まだaccount_selectorにいる、またはログインページにいる場合
+    if "/accounts" not in driver.current_url and "ptn=" not in driver.current_url:
+        print("マネーフォワード本体へ遷移します...")
+        driver.get("https://moneyforward.com")
+        time.sleep(5)
 
-    # accountsページへの遷移を確認（柔軟なチェック）
-    print(f"ページ遷移確認中... 現在のURL: {driver.current_url}")
+    # 最終確認: account_selectorに戻されていないかチェック
+    if "/account_selector" in driver.current_url:
+        print("エラー: account_selectorから抜け出せませんでした")
+        raise Exception("アカウント選択に失敗しました")
 
-    # タイムアウトを延長し、エラーをキャッチ
-    try:
-        WebDriverWait(driver, 90).until(
-            lambda d: "/accounts" in d.current_url or "/bs/home" in d.current_url
-        )
-    except TimeoutException:
-        # タイムアウトしても、ログインページでなければ成功とみなす
-        if "/sign_in" not in driver.current_url and "/email_otp" not in driver.current_url:
-            print(f"警告: accountsページへの遷移がタイムアウトしましたが、ログイン状態は確立されています")
-        else:
-            print(f"エラー: ログインに失敗しました。現在のURL: {driver.current_url}")
-            raise Exception("ログインに失敗しました")
-
-    time.sleep(5)  # セッション確立を待つ
+    print(f"✓ ログイン完了 現在のURL: {driver.current_url}")
+    time.sleep(3)  # セッション確立を待つ
 
     # クッキーを保存
     save_cookies(driver, COOKIE_FILE)
@@ -672,12 +649,15 @@ def get_all_amount():
         print("✓ registered-accounts要素が見つかりました")
     except Exception as e:
         print(f"Warning: 'registered-accounts' section not loaded within timeout: {e}")
-        # デバッグ用スクリーンショット
+        # デバッグ用スクリーンショットとHTML保存
         try:
             driver.save_screenshot("debug_get_all_amount.png")
             print("デバッグ用スクリーンショットを保存しました: debug_get_all_amount.png")
-        except:
-            pass
+            with open("debug_get_all_amount.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            print("デバッグ用HTMLを保存しました: debug_get_all_amount.html")
+        except Exception as save_err:
+            print(f"デバッグファイル保存エラー: {save_err}")
 
     # Beautiful Soupでパース
     soup = BeautifulSoup(driver.page_source, "html.parser")
