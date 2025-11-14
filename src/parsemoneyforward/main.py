@@ -109,10 +109,9 @@ def attempt_cookie_login():
     except FileNotFoundError:
         return False
 
+    # クッキーをセットするために一度サイトを開く
     driver.get("https://moneyforward.com")
     add_cookies_to_driver(driver, cookies)
-    driver.refresh()  # クッキーを適用するためにページをリフレッシュ
-    time.sleep(2)  # リフレッシュ後のページ読み込み待機
     print("✓ クッキーをロードしました")
     return True
 
@@ -160,15 +159,9 @@ def add_cookies_to_driver(driver, cookies):
     """
     driver.delete_all_cookies()  # 既存のクッキーをクリア
     for cookie in cookies:
-        # 元のcookieを変更しないようにコピーする
-        cookie_copy = cookie.copy()
-        # domain属性を削除（Seleniumが自動的に現在のドメインを設定する）
-        if "domain" in cookie_copy:
-            del cookie_copy["domain"]
-        # sameSite属性が'None'の場合、削除する（Seleniumの互換性のため）
-        if cookie_copy.get("sameSite") == "None":
-            del cookie_copy["sameSite"]
-        driver.add_cookie(cookie_copy)
+        if "domain" in cookie:
+            del cookie["domain"]
+        driver.add_cookie(cookie)
 
 
 def _get_normalized_totp_secret():
@@ -218,29 +211,26 @@ def is_logged_in():
     """
     Seleniumを使用して、ユーザーがログインしているかを確認します。
 
-    指定されたURL（https://moneyforward.com/accounts）にアクセスし、
-    ページが/accountsかどうかでログイン状態を判定します。
+    トップページにアクセスして、ログインページにリダイレクトされないかを確認します。
 
     Returns:
         bool: ログインしていればTrue、そうでなければFalseを返します。
     """
-    url = "https://moneyforward.com/accounts"
-    driver.get(url)
-
-    # リダイレクトとJavaScriptレンダリングを待つ
-    time.sleep(10)
-
-    # 現在のURLを確認
+    # トップページにアクセス（既にクッキーロード後なのでリロードは不要）
     current_url = driver.current_url
     print(f"ログイン確認 - 現在のURL: {current_url}")
 
-    # /accountsまたは/にいればログイン成功
-    # /sign_in や /email_otp にリダイレクトされたらログイン失敗
+    # sign_inやemail_otpにリダイレクトされたらログイン失敗
     if "/sign_in" in current_url or "/email_otp" in current_url:
+        print("✗ ログイン失敗（ログインページにリダイレクトされました）")
         return False
-    if "/accounts" in current_url or current_url == "https://moneyforward.com/":
+
+    # moneyforward.comドメインにいればログイン成功
+    if "moneyforward.com" in current_url and "id.moneyforward.com" not in current_url:
+        print("✓ ログイン成功")
         return True
 
+    print("✗ ログイン失敗（予期しないURLです）")
     return False
 
 
