@@ -15,8 +15,6 @@ from bs4 import BeautifulSoup
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 from logrelay.line_relay import LineRelay
-from random_user_agent.params import OperatingSystem, SoftwareName
-from random_user_agent.user_agent import UserAgent
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -54,30 +52,27 @@ def build_chrome_options():
     """Chromeのオプションを構築する（シンプル版）"""
     chrome_options = Options()
 
-    # ユーザーデータの保存先を一意にする
-    unique_dir = f"/tmp/chrome_user_data_{os.getpid()}"
+    # ユーザーデータの保存先を一意にする（タイムスタンプを追加して完全に一意にする）
+    unique_dir = f"/tmp/chrome_user_data_{os.getpid()}_{int(time.time())}"
     chrome_options.add_argument(f"--user-data-dir={unique_dir}")
 
     # ヘッドレスモードで起動する
     chrome_options.add_argument("--headless=new")
 
-    # ユーザーエージェントの指定
-    software_names = [SoftwareName.CHROME.value]
-    operating_systems = [OperatingSystem.WINDOWS.value, OperatingSystem.LINUX.value]
-    user_agent_rotator = UserAgent(
-        software_names=software_names,
-        operating_systems=operating_systems,
-        limit=100,
-    )
-    chrome_options.add_argument(
-        f"--user-agent={user_agent_rotator.get_random_user_agent()}"
-    )
+    # 最新のChromeユーザーエージェントを使用（固定）
+    # ランダムな古いバージョンではなく、最新版を指定することで安定性を向上
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    chrome_options.add_argument(f"--user-agent={user_agent}")
 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
 
     # ウィンドウの初期サイズを最大化
     chrome_options.add_argument("--start-maximized")
+
+    # ページロードの安定性向上のための追加オプション
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.page_load_strategy = 'normal'  # ページの完全な読み込みを待つ
 
     return chrome_options
 
@@ -265,17 +260,31 @@ def is_logged_in():
 
 def _wait_for_page_load(driver, timeout=60, max_attempts=3):
     """ページの読み込みとJavaScriptレンダリングを待機"""
-    attempt_timeout = max(15, timeout // max_attempts)  # 最小15秒に延長
+    attempt_timeout = max(20, timeout // max_attempts)  # 最小20秒に延長
     last_exception = None
 
     for attempt in range(1, max_attempts + 1):
         try:
+            # まずページの読み込み完了を待つ
             time.sleep(3)
+
+            # document.readyStateの確認
+            WebDriverWait(driver, 10).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            print("document.readyState = complete")
+
+            # さらにbodyが存在することを確認
+            WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            # メール入力欄を検出
             email_element = WebDriverWait(driver, attempt_timeout).until(
                 EC.visibility_of_element_located((By.XPATH, "//input[@type='email']"))
             )
             body_count = len(driver.find_elements(By.XPATH, "//body//*"))
-            print(f"ページ読み込み完了 (要素数: {body_count})")
+            print(f"✓ ページ読み込み完了 (要素数: {body_count})")
             return email_element
         except TimeoutException as e:
             last_exception = e
@@ -283,8 +292,11 @@ def _wait_for_page_load(driver, timeout=60, max_attempts=3):
             save_debug_screenshot(driver, screenshot_name)
 
             current = driver.current_url or "about:blank"
-            if current.startswith("chrome-error://") or current == "about:blank":
-                print(f"警告: Chromeのエラーページまたは空ページが表示されています (URL: {current})")
+            page_source_length = len(driver.page_source) if driver.page_source else 0
+            print(f"現在のURL: {current}, ページソースの長さ: {page_source_length}")
+
+            if current.startswith("chrome-error://") or current == "about:blank" or page_source_length < 100:
+                print(f"警告: ページが正しく読み込まれていません (URL: {current})")
 
             message = f"メール入力欄の検出に失敗しました ({attempt}/{max_attempts})。"
             if attempt == max_attempts:
@@ -293,7 +305,7 @@ def _wait_for_page_load(driver, timeout=60, max_attempts=3):
 
             print(message + "ログインページを再取得します...")
             driver.get(DEFAULT_LOGIN_URL)
-            time.sleep(5)
+            time.sleep(8)  # 待ち時間を延長
 
     raise last_exception
 
@@ -505,6 +517,19 @@ def login_selenium(email, password):
 
     for attempt in range(1, max_login_attempts + 1):
         print(f"\n=== ログイン試行 {attempt}/{max_login_attempts} ===")
+
+        # 2回目以降の試行では、WebDriverを再作成して完全にリセット
+        if attempt > 1:
+            print("WebDriverを再作成します（完全リセット）...")
+            if driver:
+                try:
+                    driver.quit()
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"WebDriver終了時のエラー（無視）: {e}")
+            driver = create_webdriver()
+            print("✓ 新しいWebDriverを作成しました")
+
         print(f"ログインページにアクセスします... ({DEFAULT_LOGIN_URL})")
         driver.get(DEFAULT_LOGIN_URL)
 
@@ -515,7 +540,7 @@ def login_selenium(email, password):
             print(f"ページ読み込みエラー: {e}")
             if attempt == max_login_attempts:
                 raise
-            print("ページ読み込みに失敗したため再試行します...")
+            print("ページ読み込みに失敗したため、WebDriverを再作成して再試行します...")
             continue
 
         try:
@@ -564,9 +589,8 @@ def login_selenium(email, password):
             print(f"ログインエラー: {e}")
             if attempt == max_login_attempts:
                 raise
-            print("再試行のためにログインフローをリセットします...")
-            driver.delete_all_cookies()
-            time.sleep(5)
+            print("再試行のためにWebDriverを再作成します...")
+            time.sleep(3)
 
 
 def click_reloads_selenium():
