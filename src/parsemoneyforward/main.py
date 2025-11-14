@@ -238,7 +238,6 @@ def _wait_for_page_load(driver, timeout=60, max_attempts=3):
 
     for attempt in range(1, max_attempts + 1):
         try:
-            # ページ読み込み待機を追加
             time.sleep(3)
             email_element = WebDriverWait(driver, attempt_timeout).until(
                 EC.visibility_of_element_located((By.XPATH, "//input[@type='email']"))
@@ -248,18 +247,25 @@ def _wait_for_page_load(driver, timeout=60, max_attempts=3):
             return email_element
         except TimeoutException as e:
             last_exception = e
-            # デバッグ用スクリーンショット
             try:
                 screenshot_name = f"debug_login_page_retry{attempt-1}.png"
                 driver.save_screenshot(screenshot_name)
                 print(f"デバッグ用スクリーンショット保存: {screenshot_name}")
             except:
                 pass
+
+            current = driver.current_url or "about:blank"
+            if current.startswith("chrome-error://") or current == "about:blank":
+                print(f"警告: Chromeのエラーページまたは空ページが表示されています (URL: {current})")
+
+            message = f"メール入力欄の検出に失敗しました ({attempt}/{max_attempts})。"
             if attempt == max_attempts:
+                print(message + "試行回数の上限に達しました。")
                 break
-            print(f"メール入力欄の検出に失敗しました ({attempt}/{max_attempts})。ページを再読み込みします...")
-            driver.refresh()
-            time.sleep(5)  # リフレッシュ後の待機時間を延長
+
+            print(message + "ログインページを再取得します...")
+            driver.get(DEFAULT_LOGIN_URL)
+            time.sleep(5)
 
     raise last_exception
 
