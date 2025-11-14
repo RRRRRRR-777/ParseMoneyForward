@@ -29,6 +29,9 @@ load_dotenv(verbose=True)
 
 COOKIE_FILE = "cookies.pkl"
 SCREENSHOT_FILE = "reload_screenshot.png"
+TOP_PAGE_SCREENSHOT_PATH = os.environ.get(
+    "TOP_PAGE_SCREENSHOT_PATH", os.path.join("tmp", "top_page.png")
+)
 CHROMEDRIVER_PATH = os.environ.get(
     "CHROMEDRIVER_PATH", "/snap/bin/chromium.chromedriver"
 )
@@ -41,23 +44,7 @@ line_relay = LineRelay(
     os.getenv("USER_ID"),
 )
 
-DEFAULT_LOGIN_ENTRYPOINT = "https://moneyforward.com/users/sign_in"
-FALLBACK_LOGIN_URL = "https://id.moneyforward.com/sign_in/email"
-
-
-def resolve_login_url():
-    """サーバ側のリダイレクトを辿って安定したログインURLを取得"""
-    try:
-        resp = requests.get(
-            DEFAULT_LOGIN_ENTRYPOINT,
-            allow_redirects=True,
-            timeout=10,
-        )
-        if resp.ok and resp.url:
-            return resp.url
-    except requests.RequestException as e:
-        print(f"ログインURLの解決に失敗しました: {e}")
-    return FALLBACK_LOGIN_URL
+DEFAULT_LOGIN_URL = "https://moneyforward.com/users/sign_in"
 
 
 def build_chrome_options():
@@ -112,6 +99,11 @@ def attempt_cookie_login():
     # クッキーをセットするために一度サイトを開く
     driver.get("https://moneyforward.com")
     add_cookies_to_driver(driver, cookies)
+
+    # クッキーを適用するために再度ページにアクセス
+    driver.get("https://moneyforward.com")
+    time.sleep(5)  # ページ読み込みとJavaScript実行を待機
+
     print("✓ クッキーをロードしました")
     return True
 
@@ -211,13 +203,18 @@ def is_logged_in():
     """
     Seleniumを使用して、ユーザーがログインしているかを確認します。
 
-    トップページにアクセスして、ログインページにリダイレクトされないかを確認します。
+    指定されたURL（https://moneyforward.com/accounts）にアクセスし、
+    ログインページにリダイレクトされないかを確認します。
 
     Returns:
         bool: ログインしていればTrue、そうでなければFalseを返します。
     """
-    # トップページにアクセス（既にクッキーロード後なのでリロードは不要）
+    url = "https://moneyforward.com/accounts"
+    driver.get(url)
+    time.sleep(3)  # ページ読み込みを待機
+
     current_url = driver.current_url
+    print(f"ログイン確認 - アクセス先: {url}")
     print(f"ログイン確認 - 現在のURL: {current_url}")
 
     # sign_inやemail_otpにリダイレクトされたらログイン失敗
@@ -225,8 +222,8 @@ def is_logged_in():
         print("✗ ログイン失敗（ログインページにリダイレクトされました）")
         return False
 
-    # moneyforward.comドメインにいればログイン成功
-    if "moneyforward.com" in current_url and "id.moneyforward.com" not in current_url:
+    # /accountsまたはmoneyforward.comドメインにいればログイン成功
+    if "/accounts" in current_url or (current_url.startswith("https://moneyforward.com") and "id.moneyforward.com" not in current_url):
         print("✓ ログイン成功")
         return True
 
@@ -458,6 +455,29 @@ def _complete_login_and_save_cookies(driver):
     print(f"  現在のURL: {driver.current_url}")
 
 
+def capture_top_page_screenshot(path=TOP_PAGE_SCREENSHOT_PATH):
+    """ログイン後にトップページを開いてスクリーンショットを保存する"""
+    if driver is None:
+        raise RuntimeError("WebDriverが初期化されていません")
+
+    if path:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+    target_path = path or "top_page.png"
+
+    top_page_url = "https://moneyforward.com/"
+    driver.get(top_page_url)
+    time.sleep(5)
+
+    current_url = driver.current_url
+    if not current_url.startswith(top_page_url):
+        print(f"警告: トップページ以外に遷移しました (現在のURL: {current_url})")
+
+    driver.save_screenshot(target_path)
+    print(f"✓ トップページのスクリーンショットを保存しました: {target_path}")
+
+
 def login_selenium(email, password):
     """Seleniumライブラリでログインする
 
@@ -473,10 +493,9 @@ def login_selenium(email, password):
     max_login_attempts = 3
 
     for attempt in range(1, max_login_attempts + 1):
-        login_url = resolve_login_url()
         print(f"\n=== ログイン試行 {attempt}/{max_login_attempts} ===")
-        print(f"ログインページにアクセスします... ({login_url})")
-        driver.get(login_url)
+        print(f"ログインページにアクセスします... ({DEFAULT_LOGIN_URL})")
+        driver.get(DEFAULT_LOGIN_URL)
 
         # ページ読み込みとメール入力欄の検出
         try:
@@ -630,6 +649,16 @@ def get_all_amount():
                 print(f"アカウント選択エラー: {e}")
 
     print(f"口座情報の取得を開始します。現在のURL: {driver.current_url}")
+
+    # ログイン前のページが表示されていないか確認
+    try:
+        before_login = driver.find_element(By.CLASS_NAME, "before-login-home-content")
+        if before_login:
+            print("警告: ログイン前のページが表示されています。ページをリフレッシュします...")
+            driver.refresh()
+            time.sleep(5)
+    except:
+        pass  # before-login-home-contentが見つからない = ログイン済み
 
     # registered-accounts要素が表示されるまで待機
     try:
@@ -1215,6 +1244,10 @@ def main():
         driver = create_webdriver()
 
         ensure_logged_in(EMAIL, PASSWORD)
+        try:
+            capture_top_page_screenshot()
+        except Exception as screenshot_error:
+            print(f"スクリーンショット取得に失敗しました: {screenshot_error}")
 
         print("リロードボタンを押下します")
         click_reloads_selenium()
