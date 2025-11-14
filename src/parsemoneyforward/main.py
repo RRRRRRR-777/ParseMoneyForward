@@ -21,7 +21,10 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+)
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -167,6 +170,22 @@ def save_debug_screenshot(driver, filename):
     except Exception as e:
         print(f"デバッグ用スクリーンショットの保存に失敗しました ({filename}): {e}")
         return None
+
+
+def _xpath_literal(value):
+    """XPathリテラルを生成"""
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    parts = value.split("'")
+    concat_parts = []
+    for idx, part in enumerate(parts):
+        if part:
+            concat_parts.append(f"'{part}'")
+        if idx != len(parts) - 1:
+            concat_parts.append("\"'\"")
+    return "concat(" + ", ".join(concat_parts) + ")"
 
 
 def _get_normalized_totp_secret():
@@ -584,15 +603,102 @@ def click_reloads_selenium():
     print(f"現在のURL: {driver.current_url}")
 
     try:
-        elms = driver.find_elements(
-            By.XPATH, "//input[@data-disable-with='更新']")
-        print(f"{len(elms)}個の更新ボタンが見つかりました")
-        for elm in elms:
-            elm.click()
-            time.sleep(1)  # 各更新処理の完了を待つ
-        if len(elms) > 0:
-            print("すべての更新ボタンをクリックしました。更新処理の完了を待ちます...")
-            time.sleep(5)  # すべての更新処理が完了するまで待機
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "registered-accounts"))
+        )
+        selectors = [
+            "//a[contains(@href, '/aggregation_queue') and contains(normalize-space(.), '更新')]",
+            "//button[contains(normalize-space(.), '更新')]",
+            "//input[@value='更新' or @data-disable-with='更新']",
+        ]
+
+        def collect_button_infos():
+            infos = []
+            seen_keys = set()
+            for selector in selectors:
+                for element in driver.find_elements(By.XPATH, selector):
+                    if not element.is_displayed() or not element.is_enabled():
+                        continue
+                    tag = element.tag_name.lower()
+                    info = {
+                        "tag": tag,
+                        "href": element.get_attribute("href") or "",
+                        "href_dom": element.get_dom_attribute("href") or "",
+                        "value": element.get_attribute("value") or "",
+                        "data": element.get_attribute("data-disable-with") or "",
+                        "text": (element.text or "").strip(),
+                    }
+                    key_source = (
+                        info["href_dom"]
+                        or info["href"]
+                        or info["value"]
+                        or info["data"]
+                        or info["text"]
+                    )
+                    if not key_source:
+                        key_source = element.get_attribute("outerHTML")[:80]
+                    key = f"{tag}:{key_source}"
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    info["key"] = key
+                    infos.append(info)
+            return infos
+
+        def locate_button(info):
+            tag = info["tag"]
+            if tag == "a":
+                xpath_candidates = []
+                if info["href_dom"]:
+                    xpath_candidates.append(f"//a[@href={_xpath_literal(info['href_dom'])}]")
+                if info["href"]:
+                    xpath_candidates.append(f"//a[@href={_xpath_literal(info['href'])}]")
+                tail = (info["href_dom"] or info["href"]).split("/")[-1]
+                if tail:
+                    xpath_candidates.append(
+                        f"//a[contains(@href, {_xpath_literal(tail)}) and contains(normalize-space(.), '更新')]"
+                    )
+                for xpath in xpath_candidates:
+                    try:
+                        return driver.find_element(By.XPATH, xpath)
+                    except NoSuchElementException:
+                        continue
+                raise NoSuchElementException("更新リンクを再取得できませんでした")
+            if tag == "input":
+                if info["value"]:
+                    return driver.find_element(By.XPATH, f"//input[@value={_xpath_literal(info['value'])}]")
+                if info["data"]:
+                    return driver.find_element(By.XPATH, f"//input[@data-disable-with={_xpath_literal(info['data'])}]")
+            if tag == "button" and info["text"]:
+                return driver.find_element(
+                    By.XPATH,
+                    f"//button[contains(normalize-space(.), {_xpath_literal(info['text'])})]",
+                )
+            raise NoSuchElementException("更新ボタンを再取得できませんでした")
+
+        button_infos = collect_button_infos()
+        print(f"{len(button_infos)}個の更新ボタンが見つかりました")
+        for idx, info in enumerate(button_infos, start=1):
+            try:
+                button = locate_button(info)
+            except NoSuchElementException as e:
+                print(f"  - 更新ボタン {idx} を再取得できませんでした: {e}")
+                continue
+
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                    button,
+                )
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", button)
+                print(f"  - 更新ボタン {idx} をクリックしました (key: {info['key']})")
+                time.sleep(2)
+            except Exception as click_error:
+                print(f"  - 更新ボタン {idx} のクリックに失敗しました: {click_error}")
+        if button_infos:
+            print("すべての更新ボタンに対するクリックを試行しました。処理待ちとして5秒待機します。")
+            time.sleep(5)
     except Exception as e:
         print(f"更新ボタンのクリック中にエラーが発生しました。\n{e}")
 
