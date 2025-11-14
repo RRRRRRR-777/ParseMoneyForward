@@ -49,7 +49,6 @@ rye run python src/NasdaqTrade/main.py
 |PASWAORD|マネーフォワードのパスワード|
 |LINE_NOTIFY|Line Notifyのトークン|
 |NOTION_KEY|Notionのトークン|
-|NOTION_DATABASE_ID|Notionの任意のデータベースのID|
 |NOTION_PAGE_ID|Notionにページ作成する親ページのID|
 |HOUSE_BANK|お家銀行|
 |RAKUTEN_BANK|楽天銀行|
