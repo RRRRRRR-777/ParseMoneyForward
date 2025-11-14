@@ -29,8 +29,8 @@ load_dotenv(verbose=True)
 
 COOKIE_FILE = "cookies.pkl"
 SCREENSHOT_FILE = "reload_screenshot.png"
-TOP_PAGE_SCREENSHOT_PATH = os.environ.get(
-    "TOP_PAGE_SCREENSHOT_PATH", os.path.join("tmp", "top_page.png")
+DEBUG_OUTPUT_DIR = os.environ.get(
+    "DEBUG_OUTPUT_DIR", os.path.join("tmp", "debug")
 )
 CHROMEDRIVER_PATH = os.environ.get(
     "CHROMEDRIVER_PATH", "/snap/bin/chromium.chromedriver"
@@ -156,6 +156,19 @@ def add_cookies_to_driver(driver, cookies):
         driver.add_cookie(cookie)
 
 
+def save_debug_screenshot(driver, filename):
+    """デバッグ用スクリーンショットをtmp配下に保存"""
+    try:
+        os.makedirs(DEBUG_OUTPUT_DIR, exist_ok=True)
+        path = os.path.join(DEBUG_OUTPUT_DIR, filename)
+        driver.save_screenshot(path)
+        print(f"デバッグ用スクリーンショット保存: {path}")
+        return path
+    except Exception as e:
+        print(f"デバッグ用スクリーンショットの保存に失敗しました ({filename}): {e}")
+        return None
+
+
 def _get_normalized_totp_secret():
     totp_secret = os.environ.get("TOTP_SECRET")
     if not totp_secret:
@@ -247,12 +260,8 @@ def _wait_for_page_load(driver, timeout=60, max_attempts=3):
             return email_element
         except TimeoutException as e:
             last_exception = e
-            try:
-                screenshot_name = f"debug_login_page_retry{attempt-1}.png"
-                driver.save_screenshot(screenshot_name)
-                print(f"デバッグ用スクリーンショット保存: {screenshot_name}")
-            except:
-                pass
+            screenshot_name = f"debug_login_page_retry{attempt-1}.png"
+            save_debug_screenshot(driver, screenshot_name)
 
             current = driver.current_url or "about:blank"
             if current.startswith("chrome-error://") or current == "about:blank":
@@ -461,29 +470,6 @@ def _complete_login_and_save_cookies(driver):
     print(f"  現在のURL: {driver.current_url}")
 
 
-def capture_top_page_screenshot(path=TOP_PAGE_SCREENSHOT_PATH):
-    """ログイン後にトップページを開いてスクリーンショットを保存する"""
-    if driver is None:
-        raise RuntimeError("WebDriverが初期化されていません")
-
-    if path:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-    target_path = path or "top_page.png"
-
-    top_page_url = "https://moneyforward.com/"
-    driver.get(top_page_url)
-    time.sleep(5)
-
-    current_url = driver.current_url
-    if not current_url.startswith(top_page_url):
-        print(f"警告: トップページ以外に遷移しました (現在のURL: {current_url})")
-
-    driver.save_screenshot(target_path)
-    print(f"✓ トップページのスクリーンショットを保存しました: {target_path}")
-
-
 def login_selenium(email, password):
     """Seleniumライブラリでログインする
 
@@ -676,8 +662,7 @@ def get_all_amount():
         print(f"Warning: 'registered-accounts' section not loaded within timeout: {e}")
         # デバッグ用スクリーンショットとHTML保存
         try:
-            driver.save_screenshot("debug_get_all_amount.png")
-            print("デバッグ用スクリーンショットを保存しました: debug_get_all_amount.png")
+            save_debug_screenshot(driver, "debug_get_all_amount.png")
             with open("debug_get_all_amount.html", "w", encoding="utf-8") as f:
                 f.write(driver.page_source)
             print("デバッグ用HTMLを保存しました: debug_get_all_amount.html")
@@ -1143,8 +1128,7 @@ def get_current_month_expense():
         print(f"Warning: 'monthly-total' section not loaded within timeout: {e}")
         # デバッグ用スクリーンショット
         try:
-            driver.save_screenshot("debug_get_current_month_expense.png")
-            print("デバッグ用スクリーンショットを保存しました: debug_get_current_month_expense.png")
+            save_debug_screenshot(driver, "debug_get_current_month_expense.png")
         except:
             pass
 
@@ -1250,10 +1234,6 @@ def main():
         driver = create_webdriver()
 
         ensure_logged_in(EMAIL, PASSWORD)
-        try:
-            capture_top_page_screenshot()
-        except Exception as screenshot_error:
-            print(f"スクリーンショット取得に失敗しました: {screenshot_error}")
 
         print("リロードボタンを押下します")
         click_reloads_selenium()
