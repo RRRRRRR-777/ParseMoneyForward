@@ -930,7 +930,7 @@ class CreateMonthlyBalancePage:
         """
         return next(
             (item for item in all_amount[key]
-             if item["bank_name"] == bank_name),
+             if bank_name in item["bank_name"]),
             default,
         )
 
